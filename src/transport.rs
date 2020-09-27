@@ -99,6 +99,7 @@ pub enum Error {
 
 pub struct QuicListener {
     endpoint: Arc<Endpoint>,
+    addresses: Vec<ListeningAddress>,
     pending: VecDeque<ListenerEvent<Upgrade, Error>>,
 }
 
@@ -138,19 +139,83 @@ impl QuicListener {
         let endpoint = Endpoint::new(config, local_socket_addr)
             .map_err(|e| TransportError::Other(Error::Listen(e)))?;
 
-        let mut pending = VecDeque::new();
         let socket_addr = endpoint.local_addr();
-        if socket_addr.ip().is_unspecified() {
-            let addresses = host_addresses(socket_addr.port())
-                .map_err(|e| TransportError::Other(Error::Listen(e)))?;
-            for (_, _, addr) in addresses {
-                pending.push_back(ListenerEvent::NewAddress(addr));
-            }
-        } else {
+        let mut pending = VecDeque::new();
+        if !socket_addr.ip().is_unspecified() {
             let addr = socketaddr_to_multiaddr(&socket_addr);
             pending.push_back(ListenerEvent::NewAddress(addr));
         }
-        Ok(Self { endpoint, pending })
+        Ok(Self {
+            endpoint,
+            addresses: Default::default(),
+            pending,
+        })
+    }
+
+    // If we listen on all interfaces, find out to which interface the given
+    // socket address belongs. In case we think the address is new, check
+    // all host interfaces again and report new and expired listen addresses.
+    pub fn check_for_interface_changes(&mut self) -> Result<(), io::Error> {
+        let socket_addr = self.endpoint.local_addr();
+        if !socket_addr.ip().is_unspecified() {
+            return Ok(());
+        }
+
+        // Check for exact match:
+        if self
+            .addresses
+            .iter()
+            .find(|addr| addr.ip == socket_addr.ip())
+            .is_some()
+        {
+            return Ok(());
+        }
+
+        // No exact match => check netmask
+        if self
+            .addresses
+            .iter()
+            .find(|addr| addr.net.contains(&socket_addr.ip()))
+            .is_some()
+        {
+            return Ok(());
+        }
+
+        let new_addresses: Vec<_> = get_if_addrs()?
+            .into_iter()
+            .map(|iface| ListeningAddress::new(iface.addr, socket_addr.port()))
+            .collect();
+
+        // Check for addresses no longer in use.
+        for addr in self.addresses.iter() {
+            if new_addresses
+                .iter()
+                .find(|addr2| addr2.ip == addr.ip)
+                .is_none()
+            {
+                log::debug!("Expired listen address: {}", addr.multiaddr);
+                self.pending
+                    .push_back(ListenerEvent::AddressExpired(addr.multiaddr.clone()));
+            }
+        }
+
+        // Check for new addresses.
+        for addr in new_addresses.iter() {
+            if self
+                .addresses
+                .iter()
+                .find(|addr2| addr2.ip == addr.ip)
+                .is_none()
+            {
+                log::debug!("New listen address: {}", addr.multiaddr);
+                self.pending
+                    .push_back(ListenerEvent::NewAddress(addr.multiaddr.clone()));
+            }
+        }
+
+        self.addresses = new_addresses;
+
+        Ok(())
     }
 }
 
@@ -182,6 +247,10 @@ impl Stream for QuicListener {
     type Item = Result<ListenerEvent<Upgrade, Error>, Error>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+        if let Err(err) = self.check_for_interface_changes() {
+            return Poll::Ready(Some(Ok(ListenerEvent::Error(Error::Listen(err)))));
+        }
+
         if let Some(event) = self.pending.pop_front() {
             return Poll::Ready(Some(Ok(event)));
         }
@@ -192,7 +261,6 @@ impl Stream for QuicListener {
             Poll::Pending => return Poll::Pending,
         };
         let remote_addr = socketaddr_to_multiaddr(&conn.remote_addr());
-        // TODO: check for interface changes
         let local_addr = socketaddr_to_multiaddr(&self.endpoint.local_addr());
         Poll::Ready(Some(Ok(ListenerEvent::Upgrade {
             upgrade: Upgrade::from_connection(conn),
@@ -252,13 +320,18 @@ pub(crate) fn socketaddr_to_multiaddr(socket_addr: &SocketAddr) -> Multiaddr {
         .with(Protocol::Quic)
 }
 
-// Collect all local host addresses and use the provided port number as listen port.
-fn host_addresses(port: u16) -> io::Result<Vec<(IpAddr, IpNet, Multiaddr)>> {
-    let mut addrs = Vec::new();
-    for iface in get_if_addrs()? {
+#[derive(Debug)]
+struct ListeningAddress {
+    ip: IpAddr,
+    net: IpNet,
+    multiaddr: Multiaddr,
+}
+
+impl ListeningAddress {
+    pub fn new(iface: IfAddr, port: u16) -> Self {
         let ip = iface.ip();
-        let ma = socketaddr_to_multiaddr(&SocketAddr::new(ip, port));
-        let ipn = match iface.addr {
+        let multiaddr = socketaddr_to_multiaddr(&SocketAddr::new(ip, port));
+        let net = match iface {
             IfAddr::V4(ip4) => {
                 let prefix_len = (!u32::from_be_bytes(ip4.netmask.octets())).leading_zeros();
                 let ipnet = Ipv4Net::new(ip4.ip, prefix_len as u8)
@@ -272,73 +345,8 @@ fn host_addresses(port: u16) -> io::Result<Vec<(IpAddr, IpNet, Multiaddr)>> {
                 IpNet::V6(ipnet)
             }
         };
-        addrs.push((ip, ipn, ma))
+        Self { ip, net, multiaddr }
     }
-    Ok(addrs)
-}
-
-// If we listen on all interfaces, find out to which interface the given
-// socket address belongs. In case we think the address is new, check
-// all host interfaces again and report new and expired listen addresses.
-fn check_for_interface_changes(
-    socket_addr: &SocketAddr,
-    listen_port: u16,
-    listen_addrs: &mut Vec<(IpAddr, IpNet, Multiaddr)>,
-    pending: &mut VecDeque<ListenerEvent<Upgrade, Error>>,
-) -> Result<(), io::Error> {
-    // Check for exact match:
-    if listen_addrs
-        .iter()
-        .find(|(ip, ..)| ip == &socket_addr.ip())
-        .is_some()
-    {
-        return Ok(());
-    }
-
-    // No exact match => check netmask
-    if listen_addrs
-        .iter()
-        .find(|(_, net, _)| net.contains(&socket_addr.ip()))
-        .is_some()
-    {
-        return Ok(());
-    }
-
-    // The local IP address of this socket is new to us.
-    // We check for changes in the set of host addresses and report new
-    // and expired addresses.
-    //
-    // TODO: We do not detect expired addresses unless there is a new address.
-    let old_listen_addrs = std::mem::replace(listen_addrs, host_addresses(listen_port)?);
-
-    // Check for addresses no longer in use.
-    for (ip, _, ma) in old_listen_addrs.iter() {
-        if listen_addrs.iter().find(|(i, ..)| i == ip).is_none() {
-            log::debug!("Expired listen address: {}", ma);
-            pending.push_back(ListenerEvent::AddressExpired(ma.clone()));
-        }
-    }
-
-    // Check for new addresses.
-    for (ip, _, ma) in listen_addrs.iter() {
-        if old_listen_addrs.iter().find(|(i, ..)| i == ip).is_none() {
-            log::debug!("New listen address: {}", ma);
-            pending.push_back(ListenerEvent::NewAddress(ma.clone()));
-        }
-    }
-
-    // We should now be able to find the local address, if not something
-    // is seriously wrong and we report an error.
-    if listen_addrs
-        .iter()
-        .find(|(ip, net, _)| ip == &socket_addr.ip() || net.contains(&socket_addr.ip()))
-        .is_none()
-    {
-        let msg = format!("{} does not match any listen address", socket_addr.ip());
-        return Err(io::Error::new(io::ErrorKind::Other, msg));
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]

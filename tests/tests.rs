@@ -46,9 +46,9 @@ fn wildcard_expansion() {
     // do not contain wildcard address or port.
     futures::executor::block_on(async move {
         while let Some(event) = incoming.next().await.map(|e| e.unwrap()) {
+            println!("{:?}", event);
             match event {
                 ListenerEvent::NewAddress(a) => {
-                    println!("{}", a);
                     let mut iter = a.iter();
                     match iter.next().expect("ip address") {
                         Protocol::Ip4(ip) => assert!(!ip.is_unspecified()),
