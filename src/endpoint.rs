@@ -28,7 +28,8 @@
 //! the rest of the code only happens through channels. See the documentation of the
 //! [`background_task`] for a thorough description.
 
-use crate::{connection::Connection, x509};
+use crate::connection::Connection;
+use crate::transport::QuicConfig;
 
 use async_std::net::SocketAddr;
 use futures::{
@@ -36,54 +37,13 @@ use futures::{
     lock::Mutex,
     prelude::*,
 };
-use libp2p_core::multiaddr::Multiaddr;
 use std::{
     collections::{HashMap, VecDeque},
     fmt, io,
     sync::{Arc, Weak},
     task::Poll,
-    time::{Duration, Instant},
+    time::Instant,
 };
-
-/// Represents the configuration for the [`Endpoint`].
-#[derive(Debug, Clone)]
-pub struct Config {
-    /// The client configuration to pass to `quinn_proto`.
-    client_config: quinn_proto::ClientConfig,
-    /// The server configuration to pass to `quinn_proto`.
-    server_config: Arc<quinn_proto::ServerConfig>,
-    /// The endpoint configuration to pass to `quinn_proto`.
-    endpoint_config: Arc<quinn_proto::EndpointConfig>,
-    /// The [`Multiaddr`] to use to spawn the UDP socket.
-    multiaddr: Multiaddr,
-}
-
-impl Config {
-    /// Creates a new configuration object with default values.
-    pub fn new(
-        keypair: &libp2p_core::identity::Keypair,
-        multiaddr: Multiaddr,
-    ) -> Result<Self, x509::ConfigError> {
-        let mut transport = quinn_proto::TransportConfig::default();
-        transport.stream_window_uni(0);
-        transport.datagram_receive_buffer_size(None);
-        transport.keep_alive_interval(Some(Duration::from_millis(10)));
-        let transport = Arc::new(transport);
-        let (client_tls_config, server_tls_config) = x509::make_tls_config(keypair)?;
-        let mut server_config = quinn_proto::ServerConfig::default();
-        server_config.transport = transport.clone();
-        server_config.crypto = Arc::new(server_tls_config);
-        let mut client_config = quinn_proto::ClientConfig::default();
-        client_config.transport = transport;
-        client_config.crypto = Arc::new(client_tls_config);
-        Ok(Self {
-            client_config,
-            server_config: Arc::new(server_config),
-            endpoint_config: Default::default(),
-            multiaddr: multiaddr,
-        })
-    }
-}
 
 /// Object containing all the QUIC resources shared between all connections.
 // TODO: expand docs
@@ -105,34 +65,19 @@ pub struct Endpoint {
     /// slot in the messages buffer.
     to_endpoint2: mpsc::Sender<ToEndpoint>,
 
-    /// Configuration passed at initialization.
-    // TODO: remove?
-    config: Config,
-    /// Multiaddr of the local UDP socket passed in the configuration at initialization after it
-    /// has potentially been modified to handle port number `0`.
-    local_multiaddr: Multiaddr,
+    /// Local socket address.
+    local_socket_addr: SocketAddr,
 }
 
 impl Endpoint {
     /// Builds a new `Endpoint`.
-    pub fn new(config: Config) -> Result<Arc<Endpoint>, io::Error> {
-        let local_socket_addr = match crate::transport::multiaddr_to_socketaddr(&config.multiaddr) {
-            Ok(a) => a,
-            Err(()) => panic!(), // TODO: Err(TransportError::MultiaddrNotSupported(multiaddr)),
-        };
-
+    pub fn new(
+        config: QuicConfig,
+        local_socket_addr: SocketAddr,
+    ) -> Result<Arc<Endpoint>, io::Error> {
         // NOT blocking, as per man:bind(2), as we pass an IP address.
         let socket = std::net::UdpSocket::bind(&local_socket_addr)?;
-        // TODO:
-        /*let port_is_zero = local_socket_addr.port() == 0;
         let local_socket_addr = socket.local_addr()?;
-        if port_is_zero {
-            assert_ne!(local_socket_addr.port(), 0);
-            assert_eq!(multiaddr.pop(), Some(Protocol::Quic));
-            assert_eq!(multiaddr.pop(), Some(Protocol::Udp(0)));
-            multiaddr.push(Protocol::Udp(local_socket_addr.port()));
-            multiaddr.push(Protocol::Quic);
-        }*/
 
         let (to_endpoint_tx, to_endpoint_rx) = mpsc::channel(32);
         let to_endpoint2 = to_endpoint_tx.clone();
@@ -142,13 +87,12 @@ impl Endpoint {
             to_endpoint: Mutex::new(to_endpoint_tx),
             to_endpoint2,
             new_connections: Mutex::new(new_connections_rx),
-            config: config.clone(),
-            local_multiaddr: config.multiaddr.clone(), // TODO: no
+            local_socket_addr,
         });
 
         // TODO: just for testing, do proper task spawning
         async_std::task::spawn(background_task(
-            config.clone(),
+            config,
             Arc::downgrade(&endpoint),
             async_std::net::UdpSocket::from(socket),
             new_connections_tx,
@@ -156,49 +100,11 @@ impl Endpoint {
         ));
 
         Ok(endpoint)
+    }
 
-        // TODO: IP address stuff
-        /*if socket_addr.ip().is_unspecified() {
-            info!("returning all local IPs for unspecified address");
-            let suffixes = [Protocol::Udp(socket_addr.port()), Protocol::Quic];
-            let local_addresses =
-                host_addresses(&suffixes).map_err(|e| TransportError::Other(Error::IO(e)))?;
-            for (_, _, address) in local_addresses {
-                info!("sending address {:?}", address);
-                new_connections
-                    .unbounded_send(ListenerEvent::NewAddress(address))
-                    .expect("we have a reference to the peer, so this will not fail; qed")
-            }
-        } else {
-            info!("sending address {:?}", multiaddr);
-            new_connections
-                .unbounded_send(ListenerEvent::NewAddress(multiaddr.clone()))
-                .expect("we have a reference to the peer, so this will not fail; qed");
-        }
-
-        if socket_addr.ip().is_unspecified() {
-            debug!("returning all local IPs for unspecified address");
-            let local_addresses =
-                host_addresses(&[Protocol::Udp(socket_addr.port()), Protocol::Quic])
-                    .map_err(|e| TransportError::Other(Error::IO(e)))?;
-            for i in local_addresses {
-                info!("sending address {:?}", i.2);
-                reference
-                    .new_connections
-                    .unbounded_send(ListenerEvent::NewAddress(i.2))
-                    .expect("we have a reference to the peer, so this will not fail; qed")
-            }
-        } else {
-            info!("sending address {:?}", multiaddr);
-            reference
-                .new_connections
-                .unbounded_send(ListenerEvent::NewAddress(multiaddr))
-                .expect("we have a reference to the peer, so this will not fail; qed");
-        }
-
-        let endpoint = EndpointRef { reference, channel };
-        let join_handle = spawn(endpoint.clone());
-        Ok((Self(endpoint), join_handle))*/
+    /// Returns the local socket addr.
+    pub(crate) fn local_addr(&self) -> SocketAddr {
+        self.local_socket_addr
     }
 
     /// Asks the endpoint to start dialing the given address.
@@ -413,7 +319,7 @@ enum ToEndpoint {
 /// for as long as any QUIC connection is open.
 ///
 async fn background_task(
-    config: Config,
+    config: QuicConfig,
     endpoint_weak: Weak<Endpoint>,
     udp_socket: async_std::net::UdpSocket,
     mut new_connections: mpsc::Sender<Connection>,

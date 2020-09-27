@@ -9,13 +9,13 @@ keywords = ["peer-to-peer", "libp2p", "quic", "networking"]
 categories = ["network-programming", "asynchronous"]
 
 [dependencies]
-async-std = "1.6.3"
-either = "1.6.0"
-env_logger = "0.7.1"
+async-std = "1.6.4"
+either = "1.6.1"
 futures = "0.3.5"
 futures-timer = "3.0.2"
+get_if_addrs = "0.5.3"
 ipnet = "2.3.0"
-libp2p-core = "0.21.0"
+libp2p-core = "0.22.1"
 log = "0.4.11"
 parking_lot = "0.11.0"
 quinn-proto = "0.6.1"
@@ -32,5 +32,11 @@ yasna = "0.3.2"
 version = "0.5.0"
 features = ["webpki", "rustls", "std"]
 
+[dev-dependencies]
+async-macros = "2.0.0"
+async-std = { version = "1.6.4", features = ["attributes"] }
+env_logger = "0.7.1"
+
 [patch.crates-io]
+libp2p-core = { git = "https://github.com/dvc94ch/rust-libp2p", branch = "nat" }
 quinn-proto = { git = "https://github.com/djc/quinn" }

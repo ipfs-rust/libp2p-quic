@@ -22,15 +22,24 @@
 //!
 //! Combines all the objects in the other modules to implement the trait.
 
-use crate::{endpoint::Endpoint, muxer::QuicMuxer, upgrade::Upgrade};
-
+use crate::{endpoint::Endpoint, muxer::QuicMuxer, upgrade::Upgrade, x509};
 use futures::prelude::*;
+use get_if_addrs::{get_if_addrs, IfAddr};
+use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use libp2p_core::{
     multiaddr::{Multiaddr, Protocol},
     transport::{ListenerEvent, TransportError},
-    PeerId, Transport,
+    Dialer, PeerId, Transport,
 };
-use std::{net::SocketAddr, pin::Pin, sync::Arc};
+use std::{
+    collections::VecDeque,
+    io,
+    net::{IpAddr, SocketAddr},
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+    time::Duration,
+};
 
 // We reexport the errors that are exposed in the API.
 // All of these types use one another.
@@ -40,16 +49,46 @@ pub use quinn_proto::{
     TransportError as QuinnTransportError, TransportErrorCode,
 };
 
-/// Wraps around an `Arc<Endpoint>` and implements the [`Transport`] trait.
-///
-/// > **Note**: This type is necessary because Rust unfortunately forbids implementing the
-/// >           `Transport` trait directly on `Arc<Endpoint>`.
+/// Represents the configuration for the [`Endpoint`].
 #[derive(Debug, Clone)]
-pub struct QuicTransport(pub Arc<Endpoint>);
+pub struct QuicConfig {
+    /// The client configuration to pass to `quinn_proto`.
+    pub(crate) client_config: quinn_proto::ClientConfig,
+    /// The server configuration to pass to `quinn_proto`.
+    pub(crate) server_config: Arc<quinn_proto::ServerConfig>,
+    /// The endpoint configuration to pass to `quinn_proto`.
+    pub(crate) endpoint_config: Arc<quinn_proto::EndpointConfig>,
+}
+
+impl QuicConfig {
+    /// Creates a new configuration object with default values.
+    pub fn new(keypair: &libp2p_core::identity::Keypair) -> Result<Self, x509::ConfigError> {
+        let mut transport = quinn_proto::TransportConfig::default();
+        transport.stream_window_uni(0);
+        transport.datagram_receive_buffer_size(None);
+        transport.keep_alive_interval(Some(Duration::from_millis(10)));
+        let transport = Arc::new(transport);
+        let (client_tls_config, server_tls_config) = x509::make_tls_config(keypair)?;
+        let mut server_config = quinn_proto::ServerConfig::default();
+        server_config.transport = transport.clone();
+        server_config.crypto = Arc::new(server_tls_config);
+        let mut client_config = quinn_proto::ClientConfig::default();
+        client_config.transport = transport;
+        client_config.crypto = Arc::new(client_tls_config);
+        Ok(Self {
+            client_config,
+            server_config: Arc::new(server_config),
+            endpoint_config: Default::default(),
+        })
+    }
+}
 
 /// Error that can happen on the transport.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// Error while trying to bind a port.
+    #[error("{0}")]
+    Listen(io::Error),
     /// Error while trying to reach a remote.
     #[error("{0}")]
     Reach(ConnectError),
@@ -58,36 +97,67 @@ pub enum Error {
     Established(Libp2pQuicConnectionError),
 }
 
-impl Transport for QuicTransport {
+pub struct QuicListener {
+    endpoint: Arc<Endpoint>,
+    pending: VecDeque<ListenerEvent<Upgrade, Error>>,
+}
+
+impl QuicListener {
+    pub fn new(
+        config: QuicConfig,
+        addr: Multiaddr,
+    ) -> Result<
+        Pin<Box<dyn Future<Output = Result<(PeerId, QuicMuxer), Error>> + Send>>,
+        TransportError<Error>,
+    > {
+        let ip4: Multiaddr = "/ip4/0.0.0.0/udp/0/quic".parse().unwrap();
+        if ip4.can_dial(&addr) {
+            return Self::listen_on(config, ip4)?.dial(addr);
+        }
+        let ip6: Multiaddr = "/ip6/::/udp/0/quic".parse().unwrap();
+        if ip6.can_dial(&addr) {
+            return Self::listen_on(config, ip6)?.dial(addr);
+        }
+        let ip4: Multiaddr = "/ip4/127.0.0.1/udp/0/quic".parse().unwrap();
+        if ip4.can_dial(&addr) {
+            return Self::listen_on(config, ip4)?.dial(addr);
+        }
+        let ip6: Multiaddr = "/ip6/::1/udp/0/quic".parse().unwrap();
+        if ip6.can_dial(&addr) {
+            return Self::listen_on(config, ip6)?.dial(addr);
+        }
+        Err(TransportError::MultiaddrNotSupported(addr))
+    }
+
+    pub fn listen_on(config: QuicConfig, addr: Multiaddr) -> Result<Self, TransportError<Error>> {
+        let local_socket_addr = if let Ok(addr) = multiaddr_to_socketaddr(&addr) {
+            addr
+        } else {
+            return Err(TransportError::MultiaddrNotSupported(addr));
+        };
+        let endpoint = Endpoint::new(config, local_socket_addr)
+            .map_err(|e| TransportError::Other(Error::Listen(e)))?;
+
+        let mut pending = VecDeque::new();
+        let socket_addr = endpoint.local_addr();
+        if socket_addr.ip().is_unspecified() {
+            let addresses = host_addresses(socket_addr.port())
+                .map_err(|e| TransportError::Other(Error::Listen(e)))?;
+            for (_, _, addr) in addresses {
+                pending.push_back(ListenerEvent::NewAddress(addr));
+            }
+        } else {
+            let addr = socketaddr_to_multiaddr(&socket_addr);
+            pending.push_back(ListenerEvent::NewAddress(addr));
+        }
+        Ok(Self { endpoint, pending })
+    }
+}
+
+impl Dialer for QuicListener {
     type Output = (PeerId, QuicMuxer);
     type Error = Error;
-    type Listener = Pin<
-        Box<dyn Stream<Item = Result<ListenerEvent<Upgrade, Self::Error>, Self::Error>> + Send>,
-    >;
-    type ListenerUpgrade = Upgrade;
     type Dial = Pin<Box<dyn Future<Output = Result<Self::Output, Self::Error>> + Send>>;
-
-    fn listen_on(self, addr: Multiaddr) -> Result<Self::Listener, TransportError<Self::Error>> {
-        // TODO: check address correctness
-
-        // TODO: report the locally opened addresses
-
-        Ok(stream::unfold((), move |()| {
-            let endpoint = self.0.clone();
-            let addr = addr.clone();
-            async move {
-                let connec = endpoint.next_incoming().await;
-                let remote_addr = socketaddr_to_multiaddr(&connec.remote_addr());
-                let event = Ok(ListenerEvent::Upgrade {
-                    upgrade: Upgrade::from_connection(connec),
-                    local_addr: addr.clone(), // TODO: hack
-                    remote_addr,
-                });
-                Some((event, ()))
-            }
-        })
-        .boxed())
-    }
 
     fn dial(self, addr: Multiaddr) -> Result<Self::Dial, TransportError<Self::Error>> {
         let socket_addr = if let Ok(socket_addr) = multiaddr_to_socketaddr(&addr) {
@@ -98,13 +168,56 @@ impl Transport for QuicTransport {
         } else {
             return Err(TransportError::MultiaddrNotSupported(addr));
         };
-
+        let endpoint = self.endpoint.clone();
         Ok(async move {
-            let connection = self.0.dial(socket_addr).await.map_err(Error::Reach)?;
-            let final_connec = Upgrade::from_connection(connection).await?;
-            Ok(final_connec)
+            let conn = endpoint.dial(socket_addr).await.map_err(Error::Reach)?;
+            let final_conn = Upgrade::from_connection(conn).await?;
+            Ok(final_conn)
         }
         .boxed())
+    }
+}
+
+impl Stream for QuicListener {
+    type Item = Result<ListenerEvent<Upgrade, Error>, Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+        if let Some(event) = self.pending.pop_front() {
+            return Poll::Ready(Some(Ok(event)));
+        }
+
+        let mut incoming = self.endpoint.next_incoming().boxed();
+        let conn = match Pin::new(&mut incoming).poll(cx) {
+            Poll::Ready(conn) => conn,
+            Poll::Pending => return Poll::Pending,
+        };
+        let remote_addr = socketaddr_to_multiaddr(&conn.remote_addr());
+        // TODO: check for interface changes
+        let local_addr = socketaddr_to_multiaddr(&self.endpoint.local_addr());
+        Poll::Ready(Some(Ok(ListenerEvent::Upgrade {
+            upgrade: Upgrade::from_connection(conn),
+            local_addr,
+            remote_addr,
+        })))
+    }
+}
+
+impl Dialer for QuicConfig {
+    type Output = (PeerId, QuicMuxer);
+    type Error = Error;
+    type Dial = Pin<Box<dyn Future<Output = Result<Self::Output, Self::Error>> + Send>>;
+
+    fn dial(self, addr: Multiaddr) -> Result<Self::Dial, TransportError<Self::Error>> {
+        QuicListener::new(self, addr)
+    }
+}
+
+impl Transport for QuicConfig {
+    type Listener = QuicListener;
+    type ListenerUpgrade = Upgrade;
+
+    fn listen_on(self, addr: Multiaddr) -> Result<Self::Listener, TransportError<Self::Error>> {
+        QuicListener::listen_on(self, addr)
     }
 }
 
@@ -137,6 +250,95 @@ pub(crate) fn socketaddr_to_multiaddr(socket_addr: &SocketAddr) -> Multiaddr {
         .with(socket_addr.ip().into())
         .with(Protocol::Udp(socket_addr.port()))
         .with(Protocol::Quic)
+}
+
+// Collect all local host addresses and use the provided port number as listen port.
+fn host_addresses(port: u16) -> io::Result<Vec<(IpAddr, IpNet, Multiaddr)>> {
+    let mut addrs = Vec::new();
+    for iface in get_if_addrs()? {
+        let ip = iface.ip();
+        let ma = socketaddr_to_multiaddr(&SocketAddr::new(ip, port));
+        let ipn = match iface.addr {
+            IfAddr::V4(ip4) => {
+                let prefix_len = (!u32::from_be_bytes(ip4.netmask.octets())).leading_zeros();
+                let ipnet = Ipv4Net::new(ip4.ip, prefix_len as u8)
+                    .expect("prefix_len is the number of bits in a u32, so can not exceed 32");
+                IpNet::V4(ipnet)
+            }
+            IfAddr::V6(ip6) => {
+                let prefix_len = (!u128::from_be_bytes(ip6.netmask.octets())).leading_zeros();
+                let ipnet = Ipv6Net::new(ip6.ip, prefix_len as u8)
+                    .expect("prefix_len is the number of bits in a u128, so can not exceed 128");
+                IpNet::V6(ipnet)
+            }
+        };
+        addrs.push((ip, ipn, ma))
+    }
+    Ok(addrs)
+}
+
+// If we listen on all interfaces, find out to which interface the given
+// socket address belongs. In case we think the address is new, check
+// all host interfaces again and report new and expired listen addresses.
+fn check_for_interface_changes(
+    socket_addr: &SocketAddr,
+    listen_port: u16,
+    listen_addrs: &mut Vec<(IpAddr, IpNet, Multiaddr)>,
+    pending: &mut VecDeque<ListenerEvent<Upgrade, Error>>,
+) -> Result<(), io::Error> {
+    // Check for exact match:
+    if listen_addrs
+        .iter()
+        .find(|(ip, ..)| ip == &socket_addr.ip())
+        .is_some()
+    {
+        return Ok(());
+    }
+
+    // No exact match => check netmask
+    if listen_addrs
+        .iter()
+        .find(|(_, net, _)| net.contains(&socket_addr.ip()))
+        .is_some()
+    {
+        return Ok(());
+    }
+
+    // The local IP address of this socket is new to us.
+    // We check for changes in the set of host addresses and report new
+    // and expired addresses.
+    //
+    // TODO: We do not detect expired addresses unless there is a new address.
+    let old_listen_addrs = std::mem::replace(listen_addrs, host_addresses(listen_port)?);
+
+    // Check for addresses no longer in use.
+    for (ip, _, ma) in old_listen_addrs.iter() {
+        if listen_addrs.iter().find(|(i, ..)| i == ip).is_none() {
+            log::debug!("Expired listen address: {}", ma);
+            pending.push_back(ListenerEvent::AddressExpired(ma.clone()));
+        }
+    }
+
+    // Check for new addresses.
+    for (ip, _, ma) in listen_addrs.iter() {
+        if old_listen_addrs.iter().find(|(i, ..)| i == ip).is_none() {
+            log::debug!("New listen address: {}", ma);
+            pending.push_back(ListenerEvent::NewAddress(ma.clone()));
+        }
+    }
+
+    // We should now be able to find the local address, if not something
+    // is seriously wrong and we report an error.
+    if listen_addrs
+        .iter()
+        .find(|(ip, net, _)| ip == &socket_addr.ip() || net.contains(&socket_addr.ip()))
+        .is_none()
+    {
+        let msg = format!("{} does not match any listen address", socket_addr.ip());
+        return Err(io::Error::new(io::ErrorKind::Other, msg));
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

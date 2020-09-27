@@ -27,13 +27,13 @@
 //! Example:
 //!
 //! ```
-//! use libp2p_quic::{Config, Endpoint};
-//! use libp2p_core::Multiaddr;
+//! use libp2p_quic::QuicConfig;
+//! use libp2p_core::{Multiaddr, Transport};
 //!
 //! let keypair = libp2p_core::identity::Keypair::generate_ed25519();
 //! let addr = "/ip4/127.0.0.1/udp/12345/quic".parse().expect("bad address?");
-//! let quic_config = Config::new(&keypair, addr).expect("could not make config");
-//! let quic_endpoint = Endpoint::new(quic_config).expect("I/O error");
+//! let config = QuicConfig::new(&keypair).expect("could not make config");
+//! let quic = config.listen_on(addr).expect("couldn't bind port");
 //! ```
 //!
 //! The `Endpoint` struct implements the `Transport` trait of the `core` library. See the
@@ -57,13 +57,11 @@ mod connection;
 mod endpoint;
 mod error;
 mod muxer;
+mod transport;
 mod upgrade;
 mod x509;
 
-pub mod transport;
-
-pub use endpoint::{Config, Endpoint};
 pub use error::Error;
 pub use muxer::QuicMuxer;
-pub use transport::QuicTransport;
+pub use transport::QuicConfig;
 pub use upgrade::Upgrade;
