@@ -30,6 +30,7 @@ use crate::endpoint::Endpoint;
 
 use futures::{channel::mpsc, prelude::*};
 use std::{
+    collections::VecDeque,
     fmt,
     net::SocketAddr,
     pin::Pin,
@@ -69,6 +70,8 @@ pub(crate) struct Connection {
     /// Contains `None` if it is still open.
     /// Contains `Some` if and only if a `ConnectionLost` event has been emitted.
     closed: Option<Error>,
+    /// Pending events cached until after the handshake is over.
+    pending_events: VecDeque<ConnectionEvent>,
 }
 
 /// Error on the connection as a whole.
@@ -121,12 +124,12 @@ impl Connection {
             connection_id,
             is_handshaking,
             closed: None,
+            pending_events: Default::default(),
         }
     }
 
     /// Returns the certificates sent by the remote through the underlying TLS session.
     /// Returns `None` if the connection is still handshaking.
-    // TODO: it seems to happen that is_handshaking is false but this returns None
     pub(crate) fn peer_certificates(
         &self,
     ) -> Option<impl Iterator<Item = quinn_proto::Certificate>> {
@@ -231,6 +234,12 @@ impl Connection {
             }
         }
 
+        if !self.is_handshaking() {
+            if let Some(ev) = self.pending_events.pop_front() {
+                return Poll::Ready(ev);
+            }
+        }
+
         'send_pending: loop {
             // Sending the pending event to the endpoint. If the endpoint is too busy, we just
             // stop the processing here.
@@ -319,20 +328,40 @@ impl Connection {
                             .close(Instant::now(), From::from(0u32), Default::default());
                     }
                     quinn_proto::Event::Stream(quinn_proto::StreamEvent::Readable { id }) => {
-                        return Poll::Ready(ConnectionEvent::StreamReadable(id));
+                        let ev = ConnectionEvent::StreamReadable(id);
+                        if self.is_handshaking() {
+                            self.pending_events.push_back(ev);
+                        } else {
+                            return Poll::Ready(ev);
+                        }
                     }
                     quinn_proto::Event::Stream(quinn_proto::StreamEvent::Writable { id }) => {
-                        return Poll::Ready(ConnectionEvent::StreamWritable(id));
+                        let ev = ConnectionEvent::StreamWritable(id);
+                        if self.is_handshaking() {
+                            self.pending_events.push_back(ev);
+                        } else {
+                            return Poll::Ready(ev);
+                        }
                     }
                     quinn_proto::Event::Stream(quinn_proto::StreamEvent::Available {
                         dir: quinn_proto::Dir::Bi,
                     }) => {
-                        return Poll::Ready(ConnectionEvent::StreamAvailable);
+                        let ev = ConnectionEvent::StreamAvailable;
+                        if self.is_handshaking() {
+                            self.pending_events.push_back(ev);
+                        } else {
+                            return Poll::Ready(ev);
+                        }
                     }
                     quinn_proto::Event::Stream(quinn_proto::StreamEvent::Opened {
                         dir: quinn_proto::Dir::Bi,
                     }) => {
-                        return Poll::Ready(ConnectionEvent::StreamOpened);
+                        let ev = ConnectionEvent::StreamOpened;
+                        if self.is_handshaking() {
+                            self.pending_events.push_back(ev);
+                        } else {
+                            return Poll::Ready(ev);
+                        }
                     }
                     quinn_proto::Event::Stream(quinn_proto::StreamEvent::Stopped {
                         id: _,
