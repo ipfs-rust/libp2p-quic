@@ -306,7 +306,9 @@ impl StreamMuxer for QuicMuxer {
         {
             inner.poll_close_waker = Some(cx.waker().clone());
         }
-        Poll::Pending
+
+        //Poll::Pending
+        Poll::Ready(Ok(()))
     }
 }
 

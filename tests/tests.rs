@@ -217,12 +217,6 @@ impl Drop for QuicStream {
 #[async_std::test]
 async fn communicating_between_dialer_and_listener() {
     env_logger::try_init().ok();
-    //for i in 0..1000u32 {
-    do_test(0).await
-    //}
-}
-
-async fn do_test(_i: u32) {
     let (ready_tx, ready_rx) = futures::channel::oneshot::channel();
     let mut ready_tx = Some(ready_tx);
     let keypair = libp2p_core::identity::Keypair::generate_ed25519();
@@ -244,11 +238,13 @@ async fn do_test(_i: u32) {
                     log::debug!("in: connection upgrade");
                     let (id, muxer) = upgrade.await.expect("upgrade failed");
                     let muxer = Arc::new(muxer);
+                    let muxer2 = muxer.clone();
                     log::debug!("in: muxer");
                     let mut stream = QuicStream::inbound(muxer.clone())
                         .await
                         .expect("no incoming stream");
                     log::debug!("in: accept {}", id);
+                    async_std::task::spawn(poll_fn(move |cx| muxer2.poll_event(cx)));
 
                     log::debug!("in: read");
                     let mut buf = [0u8; 3];
@@ -266,11 +262,11 @@ async fn do_test(_i: u32) {
                     log::debug!("in: eof");
                     drop(stream);
 
-                    /*log::debug!("in: close");
+                    log::debug!("in: close");
                     poll_fn(|cx| muxer.close(cx))
                         .await
                         .expect("closed successfully");
-                    log::debug!("in: closed");*/
+                    log::debug!("in: closed");
 
                     break id;
                 }
@@ -309,7 +305,7 @@ async fn do_test(_i: u32) {
         log::debug!("out: close write half");
         stream.close().await.unwrap();
 
-        /*log::debug!("out: read");
+        log::debug!("out: read");
         let mut buf = [0u8; 3];
         stream.read_exact(&mut buf).await.unwrap();
         assert_eq!(buf, [1, 2, 3]);
@@ -317,13 +313,13 @@ async fn do_test(_i: u32) {
         log::debug!("out: read");
         assert_eq!(stream.read(&mut buf).await.unwrap(), 0);
         log::debug!("out: eof");
-        drop(stream);*/
+        drop(stream);
 
-        /*log::debug!("out: close");
+        log::debug!("out: close");
         poll_fn(|cx| muxer.close(cx))
             .await
             .expect("closed successfully");
-        log::debug!("out: closed");*/
+        log::debug!("out: closed");
 
         id
     });
