@@ -41,7 +41,7 @@ fn wildcard_expansion() {
     let addr: Multiaddr = "/ip4/0.0.0.0/udp/1234/quic".parse().unwrap();
     let keypair = libp2p_core::identity::Keypair::generate_ed25519();
     let config = QuicConfig::new(&keypair).unwrap();
-    let mut incoming = config.listen_on(addr).unwrap();
+    let mut incoming = config.listen_on(addr).unwrap().0;
     // Process all initial `NewAddress` events and make sure they
     // do not contain wildcard address or port.
     futures::executor::block_on(async move {
@@ -84,6 +84,7 @@ async fn replace_port_0_in_returned_multiaddr_ipv4() {
     let new_addr = config
         .listen_on(addr)
         .unwrap()
+        .0
         .next()
         .await
         .expect("some event")
@@ -108,6 +109,7 @@ async fn replace_port_0_in_returned_multiaddr_ipv6() {
     let new_addr = config
         .listen_on(addr)
         .unwrap()
+        .0
         .next()
         .await
         .expect("some event")
@@ -129,7 +131,7 @@ fn larger_addr_denied() {
         .parse::<Multiaddr>()
         .unwrap();
     let config = QuicConfig::new(&keypair).unwrap();
-    config.listen_on(addr).unwrap();
+    config.listen_on(addr).unwrap().0;
 }
 
 #[derive(Debug)]
@@ -223,7 +225,7 @@ async fn communicating_between_dialer_and_listener() {
     let keypair2 = keypair.clone();
     let addr: Multiaddr = "/ip4/127.0.0.1/udp/0/quic".parse().expect("bad address?");
     let config = QuicConfig::new(&keypair2).unwrap();
-    let mut listener = config.listen_on(addr).unwrap();
+    let mut listener = config.listen_on(addr).unwrap().0;
     log::trace!("running tests");
     let handle = async_std::task::spawn(async move {
         let key = loop {
@@ -281,7 +283,7 @@ async fn communicating_between_dialer_and_listener() {
         let addr = ready_rx.await.unwrap();
         let config = QuicConfig::new(&keypair).unwrap();
         // Obtain a future socket through dialing
-        let (id, muxer) = config.dial(addr.clone()).unwrap().await.unwrap();
+        let (id, muxer) = config.dialer().dial(addr.clone()).unwrap().await.unwrap();
         let muxer = Arc::new(muxer);
         log::debug!("out: open {}", id);
         let muxer2 = muxer.clone();

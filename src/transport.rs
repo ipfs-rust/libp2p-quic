@@ -97,6 +97,70 @@ pub enum Error {
     Established(Libp2pQuicConnectionError),
 }
 
+#[derive(Clone)]
+pub enum QuicDialer {
+    Config(QuicConfig),
+    Endpoint(Arc<Endpoint>),
+}
+
+impl QuicDialer {
+    fn to_endpoint(self, addr: &Multiaddr) -> Result<Arc<Endpoint>, TransportError<Error>> {
+        match self {
+            Self::Config(config) => {
+                let listen_addr = [
+                    "/ip4/0.0.0.0/udp/0/quic",
+                    "/ip6/::/udp/0/quic",
+                    "/ip4/127.0.0.1/udp/0/quic",
+                    "/ip6/::1/udp/0/quic",
+                ]
+                .iter()
+                .map(|listen| {
+                    let listen: Multiaddr = listen.parse().unwrap();
+                    listen
+                })
+                .find(|listen| listen.can_dial(addr));
+
+                if let Some(addr) = listen_addr {
+                    let local_socket_addr = if let Ok(addr) = multiaddr_to_socketaddr(&addr) {
+                        addr
+                    } else {
+                        return Err(TransportError::MultiaddrNotSupported(addr));
+                    };
+                    Endpoint::new(config, local_socket_addr)
+                        .map_err(|e| TransportError::Other(Error::Listen(e)))
+                } else {
+                    Err(TransportError::MultiaddrNotSupported(addr.clone()))
+                }
+            }
+            Self::Endpoint(endpoint) => Ok(endpoint),
+        }
+    }
+}
+
+impl Dialer for QuicDialer {
+    type Output = (PeerId, QuicMuxer);
+    type Error = Error;
+    type Dial = Pin<Box<dyn Future<Output = Result<Self::Output, Self::Error>> + Send>>;
+
+    fn dial(self, addr: Multiaddr) -> Result<Self::Dial, TransportError<Self::Error>> {
+        let socket_addr = if let Ok(socket_addr) = multiaddr_to_socketaddr(&addr) {
+            if socket_addr.port() == 0 || socket_addr.ip().is_unspecified() {
+                return Err(TransportError::MultiaddrNotSupported(addr));
+            }
+            socket_addr
+        } else {
+            return Err(TransportError::MultiaddrNotSupported(addr));
+        };
+        let endpoint = self.to_endpoint(&addr)?;
+        Ok(async move {
+            let conn = endpoint.dial(socket_addr).await.map_err(Error::Reach)?;
+            let final_conn = Upgrade::from_connection(conn).await?;
+            Ok(final_conn)
+        }
+        .boxed())
+    }
+}
+
 pub struct QuicListener {
     endpoint: Arc<Endpoint>,
     addresses: Vec<ListeningAddress>,
@@ -104,32 +168,6 @@ pub struct QuicListener {
 }
 
 impl QuicListener {
-    pub fn new(
-        config: QuicConfig,
-        addr: Multiaddr,
-    ) -> Result<
-        Pin<Box<dyn Future<Output = Result<(PeerId, QuicMuxer), Error>> + Send>>,
-        TransportError<Error>,
-    > {
-        let ip4: Multiaddr = "/ip4/0.0.0.0/udp/0/quic".parse().unwrap();
-        if ip4.can_dial(&addr) {
-            return Self::listen_on(config, ip4)?.dial(addr);
-        }
-        let ip6: Multiaddr = "/ip6/::/udp/0/quic".parse().unwrap();
-        if ip6.can_dial(&addr) {
-            return Self::listen_on(config, ip6)?.dial(addr);
-        }
-        let ip4: Multiaddr = "/ip4/127.0.0.1/udp/0/quic".parse().unwrap();
-        if ip4.can_dial(&addr) {
-            return Self::listen_on(config, ip4)?.dial(addr);
-        }
-        let ip6: Multiaddr = "/ip6/::1/udp/0/quic".parse().unwrap();
-        if ip6.can_dial(&addr) {
-            return Self::listen_on(config, ip6)?.dial(addr);
-        }
-        Err(TransportError::MultiaddrNotSupported(addr))
-    }
-
     pub fn listen_on(config: QuicConfig, addr: Multiaddr) -> Result<Self, TransportError<Error>> {
         let local_socket_addr = if let Ok(addr) = multiaddr_to_socketaddr(&addr) {
             addr
@@ -150,6 +188,10 @@ impl QuicListener {
             addresses: Default::default(),
             pending,
         })
+    }
+
+    pub fn endpoint(&self) -> &Arc<Endpoint> {
+        &self.endpoint
     }
 
     // If we listen on all interfaces, find out to which interface the given
@@ -219,30 +261,6 @@ impl QuicListener {
     }
 }
 
-impl Dialer for QuicListener {
-    type Output = (PeerId, QuicMuxer);
-    type Error = Error;
-    type Dial = Pin<Box<dyn Future<Output = Result<Self::Output, Self::Error>> + Send>>;
-
-    fn dial(self, addr: Multiaddr) -> Result<Self::Dial, TransportError<Self::Error>> {
-        let socket_addr = if let Ok(socket_addr) = multiaddr_to_socketaddr(&addr) {
-            if socket_addr.port() == 0 || socket_addr.ip().is_unspecified() {
-                return Err(TransportError::MultiaddrNotSupported(addr));
-            }
-            socket_addr
-        } else {
-            return Err(TransportError::MultiaddrNotSupported(addr));
-        };
-        let endpoint = self.endpoint.clone();
-        Ok(async move {
-            let conn = endpoint.dial(socket_addr).await.map_err(Error::Reach)?;
-            let final_conn = Upgrade::from_connection(conn).await?;
-            Ok(final_conn)
-        }
-        .boxed())
-    }
-}
-
 impl Stream for QuicListener {
     type Item = Result<ListenerEvent<Upgrade, Error>, Error>;
 
@@ -270,22 +288,22 @@ impl Stream for QuicListener {
     }
 }
 
-impl Dialer for QuicConfig {
+impl Transport for QuicConfig {
     type Output = (PeerId, QuicMuxer);
     type Error = Error;
     type Dial = Pin<Box<dyn Future<Output = Result<Self::Output, Self::Error>> + Send>>;
-
-    fn dial(self, addr: Multiaddr) -> Result<Self::Dial, TransportError<Self::Error>> {
-        QuicListener::new(self, addr)
-    }
-}
-
-impl Transport for QuicConfig {
+    type Dialer = QuicDialer;
     type Listener = QuicListener;
     type ListenerUpgrade = Upgrade;
 
-    fn listen_on(self, addr: Multiaddr) -> Result<Self::Listener, TransportError<Self::Error>> {
-        QuicListener::listen_on(self, addr)
+    fn dialer(&self) -> Self::Dialer {
+        QuicDialer::Config(self.clone())
+    }
+
+    fn listen_on(self, addr: Multiaddr) -> Result<(Self::Listener, Self::Dialer), TransportError<Self::Error>> {
+        let listener = QuicListener::listen_on(self, addr)?;
+        let dialer = QuicDialer::Endpoint(listener.endpoint().clone());
+        Ok((listener, dialer))
     }
 }
 

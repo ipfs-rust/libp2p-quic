@@ -38,5 +38,5 @@ async-std = { version = "1.6.4", features = ["attributes"] }
 env_logger = "0.7.1"
 
 [patch.crates-io]
-libp2p-core = { git = "https://github.com/dvc94ch/rust-libp2p", branch = "nat" }
+libp2p-core = { git = "https://github.com/dvc94ch/rust-libp2p", branch = "transport-trait" }
 quinn-proto = { git = "https://github.com/djc/quinn" }
