@@ -39,4 +39,4 @@ env_logger = "0.7.1"
 
 [patch.crates-io]
 libp2p-core = { git = "https://github.com/dvc94ch/rust-libp2p", branch = "transport-trait" }
-quinn-proto = { git = "https://github.com/djc/quinn" }
+quinn-proto = { git = "https://github.com/djc/quinn", rev = "8e09d3befe5d6174e86992e6b3550e301a8bceb7" }
