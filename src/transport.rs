@@ -49,7 +49,7 @@ impl QuicConfig {
         };
         Ok(QuicTransport {
             inner: Arc::new(Mutex::new(QuicTransportInner {
-                channel: Endpoint::new(self, socket_addr)?.spawn()?,
+                channel: Endpoint::new(self, socket_addr)?.spawn(),
                 addresses,
             })),
         })
