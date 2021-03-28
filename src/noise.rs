@@ -1,3 +1,5 @@
+use crate::endpoint::QuicError;
+use crate::muxer::QuicMuxer;
 use bytes::BytesMut;
 use libp2p::PeerId;
 use quinn_proto::crypto::{
@@ -6,6 +8,25 @@ use quinn_proto::crypto::{
 };
 use quinn_proto::transport_parameters::TransportParameters;
 use quinn_proto::{ConfigError, ConnectError, ConnectionId, Side};
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
+pub struct NoiseUpgrade(QuicMuxer);
+
+impl NoiseUpgrade {
+    pub fn new(muxer: QuicMuxer) -> Self {
+        Self(muxer)
+    }
+}
+
+impl Future for NoiseUpgrade {
+    type Output = Result<(PeerId, QuicMuxer), QuicError>;
+
+    fn poll(self: Pin<&mut Self>, _cx: &mut Context) -> Poll<Self::Output> {
+        unimplemented!()
+    }
+}
 
 pub struct NoiseSession {}
 

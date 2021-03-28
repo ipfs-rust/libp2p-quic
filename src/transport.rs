@@ -1,30 +1,91 @@
-use crate::config::QuicConfig;
+use crate::endpoint::{Endpoint, QuicError, TransportChannel};
 use crate::muxer::QuicMuxer;
+use crate::noise::NoiseUpgrade;
+use anyhow::Result;
+use futures::channel::oneshot;
 use futures::prelude::*;
+use if_watch::{IfEvent, IfWatcher};
+use libp2p::core::identity::Keypair;
 use libp2p::core::transport::{ListenerEvent, Transport, TransportError};
 use libp2p::multiaddr::{Multiaddr, Protocol};
 use libp2p::PeerId;
-use std::net::SocketAddr;
+use parking_lot::Mutex;
+use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
-use thiserror::Error;
 
-pub struct QuicTransport {
-    //endpoints: Arc<Mutex<Vec<Arc<Endpoint>>>>,
+/// Quic configuration.
+#[derive(Clone)]
+pub struct QuicConfig {
+    pub keypair: Keypair,
 }
 
-impl Transport for QuicConfig {
+impl Default for QuicConfig {
+    fn default() -> Self {
+        Self {
+            keypair: Keypair::generate_ed25519(),
+        }
+    }
+}
+
+impl std::fmt::Debug for QuicConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.debug_struct("QuicConfig")
+            .field("keypair", &self.keypair.public())
+            .finish()
+    }
+}
+
+impl QuicConfig {
+    /// Spawns a new endpoint.
+    pub async fn listen_on(self, addr: Multiaddr) -> Result<QuicTransport> {
+        let socket_addr = multiaddr_to_socketaddr(&addr)
+            .map_err(|_| TransportError::MultiaddrNotSupported::<QuicError>(addr.clone()))?;
+        let addresses = if socket_addr.ip().is_unspecified() {
+            Addresses::Unspecified(IfWatcher::new().await?)
+        } else {
+            Addresses::Ip(Some(socket_addr.ip()))
+        };
+        Ok(QuicTransport {
+            inner: Arc::new(Mutex::new(QuicTransportInner {
+                channel: Endpoint::new(self, socket_addr)?.spawn()?,
+                addresses,
+            })),
+        })
+    }
+}
+
+#[derive(Clone)]
+pub struct QuicTransport {
+    inner: Arc<Mutex<QuicTransportInner>>,
+}
+
+impl std::fmt::Debug for QuicTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.debug_struct("QuicTransport").finish()
+    }
+}
+
+struct QuicTransportInner {
+    channel: TransportChannel,
+    addresses: Addresses,
+}
+
+enum Addresses {
+    Unspecified(IfWatcher),
+    Ip(Option<IpAddr>),
+}
+
+impl Transport for QuicTransport {
     type Output = (PeerId, QuicMuxer);
-    type Error = QuicTransportError;
-    type Listener = QuicListener;
-    type ListenerUpgrade = QuicListenerUpgrade;
+    type Error = QuicError;
+    type Listener = Self;
+    type ListenerUpgrade = NoiseUpgrade;
     type Dial = QuicDial;
 
-    fn listen_on(self, addr: Multiaddr) -> Result<Self::Listener, TransportError<Self::Error>> {
-        let socket_addr = multiaddr_to_socketaddr(&addr)
-            .map_err(|_| TransportError::MultiaddrNotSupported(addr))?;
-        tracing::debug!("listening on {}", socket_addr);
-        unimplemented!()
+    fn listen_on(self, _: Multiaddr) -> Result<Self::Listener, TransportError<Self::Error>> {
+        Ok(self)
     }
 
     fn dial(self, addr: Multiaddr) -> Result<Self::Dial, TransportError<Self::Error>> {
@@ -34,7 +95,8 @@ impl Transport for QuicConfig {
             return Err(TransportError::MultiaddrNotSupported(addr));
         }
         tracing::debug!("dialing {}", socket_addr);
-        unimplemented!()
+        let rx = self.inner.lock().channel.dial(socket_addr);
+        Ok(QuicDial::Connecting(rx))
     }
 
     fn address_translation(&self, _listen: &Multiaddr, observed: &Multiaddr) -> Option<Multiaddr> {
@@ -42,38 +104,68 @@ impl Transport for QuicConfig {
     }
 }
 
-#[derive(Debug, Error)]
-pub enum QuicTransportError {}
+impl Stream for QuicTransport {
+    type Item = Result<ListenerEvent<NoiseUpgrade, QuicError>, QuicError>;
 
-pub struct QuicListener {
-    //endpoint: Endpoint,
-}
-
-impl Stream for QuicListener {
-    type Item = Result<ListenerEvent<QuicListenerUpgrade, QuicTransportError>, QuicTransportError>;
-
-    fn poll_next(self: Pin<&mut Self>, _cx: &mut Context) -> Poll<Option<Self::Item>> {
-        unimplemented!()
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+        let mut inner = self.inner.lock();
+        match &mut inner.addresses {
+            Addresses::Ip(ip) => {
+                if let Some(ip) = ip.take() {
+                    let addr = socketaddr_to_multiaddr(&SocketAddr::new(ip, inner.channel.port()));
+                    return Poll::Ready(Some(Ok(ListenerEvent::NewAddress(addr))));
+                }
+            }
+            Addresses::Unspecified(watcher) => match Pin::new(watcher).poll(cx) {
+                Poll::Ready(Ok(IfEvent::Up(net))) => {
+                    let addr =
+                        socketaddr_to_multiaddr(&SocketAddr::new(net.addr(), inner.channel.port()));
+                    return Poll::Ready(Some(Ok(ListenerEvent::NewAddress(addr))));
+                }
+                Poll::Ready(Ok(IfEvent::Down(net))) => {
+                    let addr =
+                        socketaddr_to_multiaddr(&SocketAddr::new(net.addr(), inner.channel.port()));
+                    return Poll::Ready(Some(Ok(ListenerEvent::AddressExpired(addr))));
+                }
+                Poll::Ready(Err(err)) => return Poll::Ready(Some(Err(err.into()))),
+                Poll::Pending => {}
+            },
+        }
+        match inner.channel.poll_incoming(cx) {
+            Poll::Ready(Some(Ok(muxer))) => Poll::Ready(Some(Ok(ListenerEvent::Upgrade {
+                local_addr: muxer.local_addr(),
+                remote_addr: muxer.remote_addr(),
+                upgrade: NoiseUpgrade::new(muxer),
+            }))),
+            Poll::Ready(Some(Err(err))) => Poll::Ready(Some(Err(err))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
     }
 }
 
-pub struct QuicListenerUpgrade {}
-
-impl Future for QuicListenerUpgrade {
-    type Output = Result<(PeerId, QuicMuxer), QuicTransportError>;
-
-    fn poll(self: Pin<&mut Self>, _cx: &mut Context) -> Poll<Self::Output> {
-        unimplemented!()
-    }
+pub enum QuicDial {
+    Connecting(oneshot::Receiver<Result<QuicMuxer, QuicError>>),
+    Upgrading(NoiseUpgrade),
 }
-
-pub struct QuicDial {}
 
 impl Future for QuicDial {
-    type Output = Result<(PeerId, QuicMuxer), QuicTransportError>;
+    type Output = Result<(PeerId, QuicMuxer), QuicError>;
 
-    fn poll(self: Pin<&mut Self>, _cx: &mut Context) -> Poll<Self::Output> {
-        unimplemented!()
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+        loop {
+            match &mut *self {
+                Self::Connecting(rx) => match Pin::new(rx).poll(cx) {
+                    Poll::Ready(Ok(Ok(muxer))) => {
+                        *self = QuicDial::Upgrading(NoiseUpgrade::new(muxer));
+                    }
+                    Poll::Ready(Ok(Err(err))) => return Poll::Ready(Err(err)),
+                    Poll::Ready(Err(_)) => panic!("endpoint crashed"),
+                    Poll::Pending => return Poll::Pending,
+                },
+                Self::Upgrading(upgrade) => return Pin::new(upgrade).poll(cx),
+            }
+        }
     }
 }
 
@@ -105,7 +197,7 @@ fn multiaddr_to_socketaddr(addr: &Multiaddr) -> Result<SocketAddr, ()> {
 }
 
 /// Turns an IP address and port into the corresponding QUIC multiaddr.
-fn socketaddr_to_multiaddr(socket_addr: &SocketAddr) -> Multiaddr {
+pub(crate) fn socketaddr_to_multiaddr(socket_addr: &SocketAddr) -> Multiaddr {
     Multiaddr::empty()
         .with(socket_addr.ip().into())
         .with(Protocol::Udp(socket_addr.port()))

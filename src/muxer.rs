@@ -1,9 +1,10 @@
-use crate::endpoint::EndpointChannel;
+use crate::endpoint::ConnectionChannel;
 use crate::noise::NoiseSession;
 use async_io::Timer;
 use fnv::FnvHashMap;
 use futures::prelude::*;
 use libp2p::core::muxing::{StreamMuxer, StreamMuxerEvent};
+use libp2p::Multiaddr;
 use parking_lot::Mutex;
 use quinn_proto::generic::Connection;
 use quinn_proto::{
@@ -11,6 +12,7 @@ use quinn_proto::{
     VarInt, WriteError,
 };
 use std::io::Write;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::pin::Pin;
 use std::task::{Context, Poll, Waker};
 use std::time::Instant;
@@ -24,7 +26,7 @@ pub struct QuicMuxer {
 /// Mutex protected fields of [`QuicMuxer`].
 struct QuicMuxerInner {
     /// Endpoint channel.
-    endpoint: EndpointChannel,
+    endpoint: ConnectionChannel,
     /// Inner connection object that yields events.
     connection: Connection<NoiseSession>,
     /// Connection waker.
@@ -55,7 +57,7 @@ enum OutboundSubstreamState {
 }
 
 impl QuicMuxer {
-    pub fn new(endpoint: EndpointChannel, connection: Connection<NoiseSession>) -> Self {
+    pub fn new(endpoint: ConnectionChannel, connection: Connection<NoiseSession>) -> Self {
         Self {
             inner: Mutex::new(QuicMuxerInner {
                 endpoint,
@@ -67,6 +69,22 @@ impl QuicMuxer {
                 close_waker: None,
             }),
         }
+    }
+
+    pub fn local_addr(&self) -> Multiaddr {
+        let inner = self.inner.lock();
+        let ip = inner
+            .connection
+            .local_ip()
+            .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        let addr = SocketAddr::new(ip, inner.endpoint.port());
+        crate::transport::socketaddr_to_multiaddr(&addr)
+    }
+
+    pub fn remote_addr(&self) -> Multiaddr {
+        let inner = self.inner.lock();
+        let addr = inner.connection.remote_address();
+        crate::transport::socketaddr_to_multiaddr(&addr)
     }
 }
 
