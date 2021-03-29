@@ -20,11 +20,13 @@ use std::time::Instant;
 use thiserror::Error;
 
 /// State for a single opened QUIC connection.
+#[derive(Debug)]
 pub struct QuicMuxer {
     inner: Mutex<QuicMuxerInner>,
 }
 
 /// Mutex protected fields of [`QuicMuxer`].
+#[derive(Debug)]
 struct QuicMuxerInner {
     /// Endpoint channel.
     endpoint: ConnectionChannel,
@@ -43,7 +45,7 @@ struct QuicMuxerInner {
 }
 
 /// State of a single substream.
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct SubstreamState {
     /// Waker to wake if the substream becomes readable.
     read_waker: Option<Waker>,
@@ -52,6 +54,7 @@ struct SubstreamState {
 }
 
 /// State of a substream being opened.
+#[derive(Debug)]
 enum OutboundSubstreamState {
     Opened,
     Pending(Waker),

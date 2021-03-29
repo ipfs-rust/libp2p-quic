@@ -18,6 +18,7 @@ use std::time::Instant;
 use thiserror::Error;
 
 /// Message sent to the endpoint background task.
+#[derive(Debug)]
 enum ToEndpoint {
     /// Instructs the endpoint to start connecting to the given address.
     Dial {
@@ -36,6 +37,7 @@ enum ToEndpoint {
     Transmit(Transmit),
 }
 
+#[derive(Debug)]
 pub struct TransportChannel {
     tx: mpsc::UnboundedSender<ToEndpoint>,
     rx: mpsc::UnboundedReceiver<Result<QuicMuxer, QuicError>>,
@@ -62,6 +64,7 @@ impl TransportChannel {
     }
 }
 
+#[derive(Debug)]
 pub struct ConnectionChannel {
     id: ConnectionHandle,
     tx: mpsc::UnboundedSender<ToEndpoint>,
@@ -96,6 +99,7 @@ impl ConnectionChannel {
     }
 }
 
+#[derive(Debug)]
 struct EndpointChannel {
     rx: mpsc::UnboundedReceiver<ToEndpoint>,
     tx: mpsc::UnboundedSender<Result<QuicMuxer, QuicError>>,
@@ -118,6 +122,7 @@ impl EndpointChannel {
 
 type QuinnEndpoint = quinn_proto::generic::Endpoint<NoiseSession>;
 
+#[derive(Debug)]
 pub struct Endpoint {
     socket: Async<UdpSocket>,
     endpoint: QuinnEndpoint,
@@ -206,6 +211,7 @@ async fn background_task(
 
     loop {
         if let Some(transmit) = endpoint.poll_transmit() {
+            tracing::trace!("sending packet");
             // TODO: set ECN
             // TODO: set src_ip
             // TODO: segment_size
@@ -227,6 +233,7 @@ async fn background_task(
                             match endpoint.connect(client_config.clone(), addr, "server_name") {
                                 Ok(c) => c,
                                 Err(err) => {
+                                    tracing::error!("dial failure: {}", err);
                                     let _ = dial_tx.send(Err(err.into()));
                                     continue;
                                 }
@@ -265,6 +272,7 @@ async fn background_task(
                 }
             }
             result = socket.recv_from(&mut socket_recv_buffer).fuse() => {
+                tracing::trace!("received packet");
                 let (packet_len, packet_src) = match result {
                     Ok(v) => v,
                     Err(err) => {

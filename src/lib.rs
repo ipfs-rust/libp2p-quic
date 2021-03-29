@@ -1,4 +1,6 @@
-pub mod endpoint;
-pub mod muxer;
-pub mod noise;
-pub mod transport;
+mod endpoint;
+mod muxer;
+mod noise;
+mod transport;
+
+pub use crate::transport::QuicConfig;
