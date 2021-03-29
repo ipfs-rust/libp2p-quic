@@ -3,11 +3,11 @@ use crate::muxer::QuicMuxer;
 use bytes::BytesMut;
 use libp2p::PeerId;
 use quinn_proto::crypto::{
-    AeadKey, ClientConfig, CryptoError, ExportKeyingMaterialError, HandshakeTokenKey, HeaderKey,
-    HmacKey, KeyPair, Keys, PacketKey, ServerConfig, Session,
+    ClientConfig, CryptoError, ExportKeyingMaterialError, KeyPair, Keys, PacketKey, ServerConfig,
+    Session,
 };
 use quinn_proto::transport_parameters::TransportParameters;
-use quinn_proto::{ConfigError, ConnectError, ConnectionId, Side};
+use quinn_proto::{ConnectError, ConnectionId, Side};
 use ring::aead;
 use std::future::Future;
 use std::pin::Pin;
