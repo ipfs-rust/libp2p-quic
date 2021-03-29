@@ -4,8 +4,9 @@ use async_io::Timer;
 use fnv::FnvHashMap;
 use futures::prelude::*;
 use libp2p::core::muxing::{StreamMuxer, StreamMuxerEvent};
-use libp2p::Multiaddr;
+use libp2p::{Multiaddr, PeerId};
 use parking_lot::Mutex;
+use quinn_proto::crypto::Session;
 use quinn_proto::generic::Connection;
 use quinn_proto::{
     ConnectionError, Dir, Event, FinishError, ReadError, ReadableError, StreamEvent, StreamId,
@@ -71,6 +72,18 @@ impl QuicMuxer {
         }
     }
 
+    pub fn is_handshaking(&self) -> bool {
+        self.inner.lock().connection.is_handshaking()
+    }
+
+    pub fn peer_id(&self) -> Option<PeerId> {
+        self.inner
+            .lock()
+            .connection
+            .crypto_session()
+            .peer_identity()
+    }
+
     pub fn local_addr(&self) -> Multiaddr {
         let inner = self.inner.lock();
         let ip = inner
@@ -127,12 +140,8 @@ impl StreamMuxer for QuicMuxer {
 
         while let Some(event) = inner.connection.poll() {
             match event {
-                Event::HandshakeDataReady => {
-                    // TODO
-                }
-                Event::Connected => {
-                    // TODO
-                }
+                Event::Connected => {}
+                Event::HandshakeDataReady => {}
                 Event::ConnectionLost { reason } => {
                     tracing::debug!("connection lost because of {}", reason);
                     inner.substreams.clear();

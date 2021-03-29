@@ -1,6 +1,7 @@
 use crate::endpoint::QuicError;
 use crate::muxer::QuicMuxer;
 use bytes::BytesMut;
+use libp2p::core::StreamMuxer;
 use libp2p::PeerId;
 use quinn_proto::crypto::{
     ClientConfig, CryptoError, ExportKeyingMaterialError, KeyPair, Keys, PacketKey, ServerConfig,
@@ -12,22 +13,39 @@ use ring::aead;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use thiserror::Error;
 
-pub struct NoiseUpgrade(QuicMuxer);
+pub struct NoiseUpgrade(Option<QuicMuxer>);
 
 impl NoiseUpgrade {
     pub fn new(muxer: QuicMuxer) -> Self {
-        Self(muxer)
+        Self(Some(muxer))
     }
 }
 
 impl Future for NoiseUpgrade {
     type Output = Result<(PeerId, QuicMuxer), QuicError>;
 
-    fn poll(self: Pin<&mut Self>, _cx: &mut Context) -> Poll<Self::Output> {
-        unimplemented!()
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+        let muxer = self.0.as_ref().unwrap();
+        match muxer.poll_event(cx) {
+            Poll::Ready(Ok(_)) => Poll::Ready(Err(NoiseUpgradeError.into())),
+            Poll::Ready(Err(err)) => Poll::Ready(Err(err.into())),
+            Poll::Pending => {
+                if !muxer.is_handshaking() {
+                    if let Some(peer_id) = muxer.peer_id() {
+                        return Poll::Ready(Ok((peer_id, self.0.take().unwrap())));
+                    }
+                }
+                Poll::Pending
+            }
+        }
     }
 }
+
+#[derive(Debug, Error)]
+#[error("a `StreamMuxerEvent` was generated before the handshake was complete.")]
+pub struct NoiseUpgradeError;
 
 pub struct NoiseSession {}
 
@@ -96,6 +114,7 @@ impl Session for NoiseSession {
         None
     }
 
+    // TODO: add default implementation to quinn
     fn retry_tag(orig_dst_cid: &ConnectionId, packet: &[u8]) -> [u8; 16] {
         let mut pseudo_packet = Vec::with_capacity(packet.len() + orig_dst_cid.len() + 1);
         pseudo_packet.push(orig_dst_cid.len() as u8);
@@ -115,6 +134,7 @@ impl Session for NoiseSession {
         result
     }
 
+    // TODO: add default implementation to quinn
     fn is_valid_retry(orig_dst_cid: &ConnectionId, header: &[u8], payload: &[u8]) -> bool {
         let tag_start = match payload.len().checked_sub(16) {
             Some(x) => x,

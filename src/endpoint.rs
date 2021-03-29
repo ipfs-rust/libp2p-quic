@@ -187,6 +187,10 @@ pub enum QuicError {
     #[error("{0}")]
     Connect(#[from] ConnectError),
     #[error("{0}")]
+    Muxer(#[from] crate::muxer::QuicMuxerError),
+    #[error("{0}")]
+    Noise(#[from] crate::noise::NoiseUpgradeError),
+    #[error("{0}")]
     Io(#[from] std::io::Error),
 }
 
