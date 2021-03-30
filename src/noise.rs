@@ -21,6 +21,7 @@ pub struct NoiseUpgrade(Option<QuicMuxer>);
 
 impl NoiseUpgrade {
     pub fn new(muxer: QuicMuxer) -> Self {
+        tracing::trace!("noise upgrade");
         Self(Some(muxer))
     }
 }
@@ -199,6 +200,7 @@ impl Session for NoiseSession {
 
     fn read_handshake(&mut self, handshake: &[u8]) -> Result<bool, TransportError> {
         let state = self.state.as_mut().unwrap();
+        tracing::trace!("{:?}: read_handshake", state.side);
         let mut payload = vec![0; handshake.len()];
         let size = state
             .noise
@@ -248,6 +250,7 @@ impl Session for NoiseSession {
 
     fn write_handshake(&mut self, handshake: &mut Vec<u8>) -> Option<Keys<Self>> {
         let state = self.state.as_mut().unwrap();
+        tracing::trace!("{:?}: write_handshake", state.side);
         if !state.noise.is_my_turn() {
             return None;
         }

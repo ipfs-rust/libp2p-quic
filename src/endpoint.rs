@@ -211,7 +211,7 @@ async fn background_task(
 
     loop {
         if let Some(transmit) = endpoint.poll_transmit() {
-            tracing::trace!("sending packet");
+            tracing::trace!("sending endpoint packet");
             // TODO: set ECN
             // TODO: set src_ip
             // TODO: segment_size
@@ -229,6 +229,7 @@ async fn background_task(
             message = endpoint_channel.next_event().fuse() => {
                 match message {
                     Some(ToEndpoint::Dial { addr, tx: dial_tx }) => {
+                        tracing::trace!("dial");
                         let (id, connection) =
                             match endpoint.connect(client_config.clone(), addr, "server_name") {
                                 Ok(c) => c,
@@ -250,6 +251,7 @@ async fn background_task(
                         let _ = dial_tx.send(Ok(muxer));
                     }
                     Some(ToEndpoint::ConnectionEvent { connection_id, event }) => {
+                        tracing::trace!("connection event");
                         let is_drained_event = event.is_drained();
                         if is_drained_event {
                             connections.remove(&connection_id);
@@ -259,6 +261,7 @@ async fn background_task(
                         }
                     }
                     Some(ToEndpoint::Transmit(transmit)) => {
+                        tracing::trace!("send connection packet");
                         // TODO: set ECN
                         // TODO: set src_ip
                         // TODO: segment_size
@@ -286,9 +289,11 @@ async fn background_task(
                 match endpoint.handle(Instant::now(), packet_src, None, None, packet) {
                     None => {},
                     Some((id, DatagramEvent::ConnectionEvent(event))) => {
+                        tracing::trace!("endpoint event");
                         connections.get_mut(&id).unwrap().unbounded_send(event).ok();
                     },
                     Some((id, DatagramEvent::NewConnection(connection))) => {
+                        tracing::trace!("new connection");
                         let (tx, rx) = mpsc::unbounded();
                         connections.insert(id, tx);
                         let channel = ConnectionChannel {
