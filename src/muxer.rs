@@ -143,8 +143,8 @@ impl StreamMuxer for QuicMuxer {
 
         while let Some(event) = inner.connection.poll() {
             match event {
-                Event::Connected => {}
                 Event::HandshakeDataReady => {}
+                Event::Connected => {}
                 Event::ConnectionLost { reason } => {
                     tracing::debug!("connection lost because of {}", reason);
                     inner.substreams.clear();
@@ -241,8 +241,7 @@ impl StreamMuxer for QuicMuxer {
 
     fn destroy_outbound(&self, _: Self::OutboundSubstream) {
         let mut inner = self.inner.lock();
-        // `open_outbound` was called before polling the substream.
-        assert!(inner.pending_substream.take().is_some());
+        inner.pending_substream.take();
     }
 
     fn read_substream(
