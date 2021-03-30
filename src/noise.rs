@@ -1,16 +1,18 @@
 use crate::endpoint::QuicError;
 use crate::muxer::QuicMuxer;
-use bytes::BytesMut;
+use anyhow::Result;
+use bytes::{Buf, BufMut, BytesMut};
 use libp2p::core::StreamMuxer;
 use libp2p::PeerId;
 use quinn_proto::crypto::{
-    ClientConfig, CryptoError, ExportKeyingMaterialError, KeyPair, Keys, PacketKey, ServerConfig,
-    Session,
+    ClientConfig, CryptoError, ExportKeyingMaterialError, HeaderKey, KeyPair, Keys, PacketKey,
+    ServerConfig, Session,
 };
 use quinn_proto::transport_parameters::TransportParameters;
-use quinn_proto::{ConnectError, ConnectionId, Side};
+use quinn_proto::{ConnectError, ConnectionId, Side, TransportError, TransportErrorCode};
 use ring::aead;
 use std::future::Future;
+use std::io::Cursor;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use thiserror::Error;
@@ -47,51 +49,266 @@ impl Future for NoiseUpgrade {
 #[error("a `StreamMuxerEvent` was generated before the handshake was complete.")]
 pub struct NoiseUpgradeError;
 
-pub struct NoiseSession {}
+pub type IdentityKeypair = libp2p::core::identity::Keypair;
+
+#[derive(Clone)]
+pub struct NoiseConfig {
+    params: snow::params::NoiseParams,
+    keypair: IdentityKeypair,
+}
+
+impl std::fmt::Debug for NoiseConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.debug_struct("NoiseConfig")
+            .field("params", &self.params)
+            .field("keypair", &self.keypair.public().into_peer_id().to_string())
+            .finish()
+    }
+}
+
+impl NoiseConfig {
+    fn default() -> Self {
+        Self {
+            params: "Noise_XX_25519_AESGCM_SHA256".parse().unwrap(),
+            keypair: IdentityKeypair::generate_ed25519(),
+        }
+    }
+}
+
+impl ClientConfig<NoiseSession> for NoiseConfig {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn start_session(
+        &self,
+        _: &str,
+        params: &TransportParameters,
+    ) -> Result<NoiseSession, ConnectError> {
+        Ok(self.start_session(Side::Client, params))
+    }
+}
+
+impl ServerConfig<NoiseSession> for NoiseConfig {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn start_session(&self, params: &TransportParameters) -> NoiseSession {
+        self.start_session(Side::Server, params)
+    }
+}
+
+impl NoiseConfig {
+    fn start_session(&self, side: Side, params: &TransportParameters) -> NoiseSession {
+        let builder = snow::Builder::new(self.params.clone());
+        let x25519 = builder.generate_keypair().unwrap();
+        let builder = builder.local_private_key(&x25519.private);
+        let signed_x25519_key = self.keypair.sign(&x25519.public).unwrap();
+        let noise = if side == Side::Client {
+            builder.build_initiator().unwrap()
+        } else {
+            builder.build_responder().unwrap()
+        };
+        NoiseSession {
+            state: Some(HandshakeState {
+                side,
+                noise,
+                identity: Some(Identity {
+                    public_key: self.keypair.public().into_protobuf_encoding(),
+                    signed_x25519_key,
+                }),
+                transport_parameters: Some(*params),
+            }),
+            remote_transport_parameters: None,
+            remote_public_key: None,
+        }
+    }
+}
+
+struct Identity {
+    public_key: Vec<u8>,
+    signed_x25519_key: Vec<u8>,
+}
+
+impl Identity {
+    pub fn write<W: BufMut>(&self, w: &mut W) {
+        w.put_u16(self.public_key.len() as u16);
+        w.put_slice(&self.public_key);
+        w.put_u16(self.signed_x25519_key.len() as u16);
+        w.put_slice(&self.signed_x25519_key);
+    }
+
+    pub fn read<R: Buf>(r: &mut R, remote_static: &[u8]) -> Result<libp2p::core::identity::PublicKey> {
+        anyhow::ensure!(r.remaining() > 2, "identity too small");
+        let len = r.get_u16() as usize;
+        anyhow::ensure!(r.remaining() > len, "identity too small");
+        let public_key = libp2p::core::identity::PublicKey::from_protobuf_encoding(r.take(len).chunk())?;
+        anyhow::ensure!(r.remaining() > 2, "identity too small");
+        let len = r.get_u16() as usize;
+        anyhow::ensure!(r.remaining() > len, "identity too small");
+        let valid = public_key.verify(remote_static, r.take(len).chunk());
+        anyhow::ensure!(valid, "invalid signature");
+        Ok(public_key)
+    }
+}
+
+struct HandshakeState {
+    side: Side,
+    noise: snow::HandshakeState,
+    identity: Option<Identity>,
+    transport_parameters: Option<TransportParameters>,
+}
+
+pub struct NoiseSession {
+    state: Option<HandshakeState>,
+    remote_transport_parameters: Option<TransportParameters>,
+    remote_public_key: Option<libp2p::core::identity::PublicKey>,
+}
 
 impl Session for NoiseSession {
-    type HandshakeData = ();
+    type HandshakeData = libp2p::core::identity::PublicKey;
     type Identity = PeerId;
     type ClientConfig = NoiseConfig;
     type ServerConfig = NoiseConfig;
     type HmacKey = ring::hmac::Key;
     type HandshakeTokenKey = ring::hkdf::Prk;
-    type HeaderKey = ring::aead::quic::HeaderProtectionKey;
+    type HeaderKey = PlaintextHeaderKey;
     type PacketKey = NoisePacketKey;
 
     fn initial_keys(_: &ConnectionId, _: Side) -> Keys<Self> {
-        todo!()
+        Keys {
+            header: KeyPair {
+                local: PlaintextHeaderKey,
+                remote: PlaintextHeaderKey,
+            },
+            packet: KeyPair {
+                local: NoisePacketKey::Initial,
+                remote: NoisePacketKey::Initial,
+            },
+        }
     }
 
     fn next_1rtt_keys(&mut self) -> KeyPair<Self::PacketKey> {
-        todo!()
+        // TODO!!!
+        KeyPair {
+            local: NoisePacketKey::NextKey,
+            remote: NoisePacketKey::NextKey,
+        }
     }
 
-    fn peer_identity(&self) -> Option<Self::Identity> {
-        todo!()
+    fn read_handshake(&mut self, handshake: &[u8]) -> Result<bool, TransportError> {
+        let state = self.state.as_mut().unwrap();
+        let mut payload = vec![0; handshake.len()];
+        let size = state
+            .noise
+            .read_message(handshake, &mut payload)
+            .map_err(|err| TransportError {
+                code: TransportErrorCode::CONNECTION_REFUSED,
+                frame: None,
+                reason: err.to_string(),
+            })?;
+        payload.truncate(size);
+        let mut cursor = Cursor::new(&payload);
+        match (
+            state.side,
+            self.remote_transport_parameters.as_ref(),
+            self.remote_public_key.as_ref(),
+        ) {
+            (Side::Server, None, _) => {
+                self.remote_transport_parameters =
+                    Some(TransportParameters::read(Side::Client, &mut cursor)?);
+            }
+            (Side::Client, None, None) => {
+                self.remote_transport_parameters =
+                    Some(TransportParameters::read(Side::Server, &mut cursor)?);
+                let remote_static = state.noise.get_remote_static().unwrap();
+                let remote_public = Identity::read(&mut cursor, remote_static)
+                    .map_err(|err| TransportError {
+                        code: TransportErrorCode::CONNECTION_REFUSED,
+                        frame: None,
+                        reason: err.to_string(),
+                    })?;
+                self.remote_public_key = Some(remote_public);
+            }
+            (Side::Server, Some(_params), None) => {
+                let remote_static = state.noise.get_remote_static().unwrap();
+                let remote_public = Identity::read(&mut cursor, remote_static)
+                    .map_err(|err| TransportError {
+                        code: TransportErrorCode::CONNECTION_REFUSED,
+                        frame: None,
+                        reason: err.to_string(),
+                    })?;
+                self.remote_public_key = Some(remote_public);
+            }
+            _ => {}
+        };
+        Ok(state.noise.is_handshake_finished())
+    }
+
+    fn write_handshake(&mut self, handshake: &mut Vec<u8>) -> Option<Keys<Self>> {
+        let state = self.state.as_mut().unwrap();
+        if !state.noise.is_my_turn() {
+            return None;
+        }
+        handshake.resize(1200, 0);
+        let mut payload = vec![];
+        match (
+            state.side,
+            state.transport_parameters.as_ref(),
+            state.identity.as_ref(),
+        ) {
+            (Side::Client, Some(params), _) => {
+                params.write(&mut payload);
+                state.transport_parameters.take();
+            }
+            (Side::Server, Some(params), Some(identity)) => {
+                params.write(&mut payload);
+                state.transport_parameters.take();
+                identity.write(&mut payload);
+                state.identity.take();
+            }
+            (Side::Client, None, Some(identity)) => {
+                identity.write(&mut payload);
+                state.identity.take();
+            }
+            _ => {}
+        };
+        let size = state.noise.write_message(&payload, handshake).unwrap();
+        handshake.truncate(size);
+        None
+        /*let hash = state.noise.get_handshake_hash().to_vec();
+        Some(Keys {
+            header: KeyPair {
+                local: PlaintextHeaderKey,
+                remote: PlaintextHeaderKey,
+            },
+            packet: KeyPair {
+                local: NoisePacketKey::Handshake(hash.clone()),
+                remote: NoisePacketKey::Handshake(hash),
+            },
+        })*/
     }
 
     fn is_handshaking(&self) -> bool {
-        true
+        if let Some(state) = self.state.as_ref() {
+            !state.noise.is_handshake_finished()
+        } else {
+            false
+        }
     }
 
-    fn read_handshake(&mut self, _: &[u8]) -> Result<bool, quinn_proto::TransportError> {
-        todo!()
+    fn peer_identity(&self) -> Option<Self::Identity> {
+        let remote_public_key = self.remote_public_key.as_ref()?;
+        Some(remote_public_key.clone().into_peer_id())
     }
 
-    fn write_handshake(&mut self, _: &mut Vec<u8>) -> Option<Keys<Self>> {
-        todo!()
-    }
-
-    fn transport_parameters(
-        &self,
-    ) -> Result<Option<TransportParameters>, quinn_proto::TransportError> {
-        todo!()
+    fn transport_parameters(&self) -> Result<Option<TransportParameters>, TransportError> {
+        Ok(self.remote_transport_parameters)
     }
 
     fn handshake_data(&self) -> Option<Self::HandshakeData> {
-        // TODO optional
-        None
+        self.remote_public_key.clone()
     }
 
     fn export_keying_material(
@@ -166,49 +383,91 @@ const RETRY_INTEGRITY_NONCE: [u8; 12] = [
     0xe5, 0x49, 0x30, 0xf9, 0x7f, 0x21, 0x36, 0xf0, 0x53, 0x0a, 0x8c, 0x1c,
 ];
 
-#[derive(Clone, Debug, Default)]
-pub struct NoiseConfig {}
-
-impl ClientConfig<NoiseSession> for NoiseConfig {
-    fn new() -> Self {
-        Self {}
-    }
-
-    fn start_session(
-        &self,
-        _: &str,
-        _: &TransportParameters,
-    ) -> Result<NoiseSession, ConnectError> {
-        Ok(NoiseSession {})
-    }
+pub enum NoisePacketKey {
+    /// Initial key for first packet. We send the first packet in plain text.
+    Initial,
+    /// Key used during handshake. The handshake hash is used to encrypt the
+    /// packet.
+    Handshake(Vec<u8>),
+    /// After the handshake is complete the noise state is used to encrypt packets.
+    Transport(snow::StatelessTransportState),
+    /// When the key is exhausted due to integrity or confidentiality limits, the key
+    /// is rotated.
+    NextKey,
 }
-
-impl ServerConfig<NoiseSession> for NoiseConfig {
-    fn new() -> Self {
-        Self {}
-    }
-
-    fn start_session(&self, _: &TransportParameters) -> NoiseSession {
-        NoiseSession {}
-    }
-}
-
-pub struct NoisePacketKey {}
 
 impl PacketKey for NoisePacketKey {
-    fn encrypt(&self, _: u64, _: &mut [u8], _: usize) {
-        todo!()
+    fn encrypt(&self, packet: u64, buf: &mut [u8], header_len: usize) {
+        match self {
+            Self::Initial => {}
+            Self::Handshake(_hash) => {
+                // TODO: encrypt payload with handshake hash
+            }
+            Self::Transport(state) => {
+                // TODO: provide the header as assiciated data
+                // TODO: mutate the buffer in place
+                let (_header, payload) = buf.split_at_mut(header_len);
+                let mut buffer = Vec::with_capacity(payload.len());
+                let (content, _tag) = payload.split_at_mut(payload.len() - self.tag_len());
+                state.write_message(packet, content, &mut buffer).unwrap();
+                payload.copy_from_slice(&buffer);
+            }
+            Self::NextKey => panic!("key rotation is not implemented"),
+        }
     }
-    fn decrypt(&self, _: u64, _: &[u8], _: &mut BytesMut) -> Result<(), CryptoError> {
-        todo!()
+
+    fn decrypt(
+        &self,
+        packet: u64,
+        _header: &[u8],
+        payload: &mut BytesMut,
+    ) -> Result<(), CryptoError> {
+        match self {
+            Self::Initial => {}
+            Self::Handshake(_hash) => {
+                // TODO: decrypt payload with handshake hash
+            }
+            Self::Transport(state) => {
+                // TODO: provide the header as assiciated data
+                // TODO: mutate the buffer in place
+                if payload.len() < self.tag_len() {
+                    return Err(CryptoError);
+                }
+                let mut buffer = Vec::with_capacity(payload.len() - self.tag_len());
+                state
+                    .read_message(packet, payload, &mut buffer)
+                    .map_err(|_| CryptoError)?;
+                payload.truncate(buffer.len());
+                payload.copy_from_slice(&buffer);
+            }
+            Self::NextKey => panic!("key rotation is not implemented"),
+        };
+        Ok(())
     }
+
     fn tag_len(&self) -> usize {
-        todo!()
+        16
     }
+
     fn confidentiality_limit(&self) -> u64 {
-        todo!()
+        // TODO: noise spec doesn't mention anything specific and assumes `u64::MAX`.
+        u64::MAX
     }
+
     fn integrity_limit(&self) -> u64 {
-        todo!()
+        // TODO: noise spec doesn't mention anything specific and assumes `u64::MAX`.
+        u64::MAX
+    }
+}
+
+pub struct PlaintextHeaderKey;
+
+impl HeaderKey for PlaintextHeaderKey {
+    fn decrypt(&self, _pn_offset: usize, _packet: &mut [u8]) {}
+
+    fn encrypt(&self, _pn_offset: usize, _packet: &mut [u8]) {}
+
+    fn sample_size(&self) -> usize {
+        0
     }
 }

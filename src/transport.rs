@@ -40,7 +40,9 @@ impl std::fmt::Debug for QuicConfig {
 impl QuicConfig {
     /// Creates a new config from a keypair.
     pub fn new(keypair: &Keypair) -> Self {
-        Self { keypair: keypair.clone() }
+        Self {
+            keypair: keypair.clone(),
+        }
     }
 
     /// Spawns a new endpoint.

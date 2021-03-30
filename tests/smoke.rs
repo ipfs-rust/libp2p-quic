@@ -41,12 +41,12 @@ async fn communicating_between_dialer_and_listener_swarm() -> Result<()> {
 
     Swarm::dial_addr(&mut b, addr)?;
 
-    match b.next_event().await {
-        SwarmEvent::ConnectionEstablished { .. } => {}
+    match a.next_event().await {
+        SwarmEvent::IncomingConnection { .. } => {}
         e => panic!("{:?}", e),
     };
 
-    match a.next_event().await {
+    match b.next_event().await {
         SwarmEvent::ConnectionEstablished { .. } => {}
         e => panic!("{:?}", e),
     };
