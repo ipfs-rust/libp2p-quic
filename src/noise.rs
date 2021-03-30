@@ -22,7 +22,6 @@ pub struct NoiseUpgrade(Option<QuicMuxer>);
 
 impl NoiseUpgrade {
     pub fn new(muxer: QuicMuxer) -> Self {
-        tracing::trace!("noise upgrade");
         Self(Some(muxer))
     }
 }
@@ -38,6 +37,7 @@ impl Future for NoiseUpgrade {
             Poll::Pending => {
                 if !muxer.is_handshaking() {
                     if let Some(peer_id) = muxer.peer_id() {
+                        tracing::trace!("noise upgrade complete");
                         return Poll::Ready(Ok((peer_id, self.0.take().unwrap())));
                     }
                 }
@@ -55,8 +55,8 @@ pub type IdentityKeypair = libp2p::core::identity::Keypair;
 
 #[derive(Clone)]
 pub struct NoiseConfig {
-    params: snow::params::NoiseParams,
-    keypair: IdentityKeypair,
+    pub(crate) params: snow::params::NoiseParams,
+    pub(crate) keypair: IdentityKeypair,
 }
 
 impl std::fmt::Debug for NoiseConfig {
@@ -360,6 +360,7 @@ impl Session for NoiseSession {
                 },
             })
         } else if state.state == State::HandshakeComplete {
+            tracing::trace!("handshake complete");
             let state = self.state.take().unwrap();
             let key = Arc::new(state.noise.into_stateless_transport_mode().unwrap());
             Some(Keys {
@@ -515,7 +516,7 @@ impl PacketKey for NoisePacketKey {
                 if payload.len() < self.tag_len() {
                     return Err(CryptoError);
                 }
-                let mut buffer = Vec::with_capacity(payload.len() - self.tag_len());
+                let mut buffer = vec![0; payload.len() - self.tag_len()];
                 state
                     .read_message(packet, payload, &mut buffer)
                     .map_err(|_| CryptoError)?;

@@ -144,7 +144,10 @@ impl StreamMuxer for QuicMuxer {
         while let Some(event) = inner.connection.poll() {
             match event {
                 Event::HandshakeDataReady => {}
-                Event::Connected => {}
+                Event::Connected => {
+                    // Break here so that the noise upgrade can finish.
+                    return Poll::Pending;
+                }
                 Event::ConnectionLost { reason } => {
                     tracing::debug!("connection lost because of {}", reason);
                     inner.substreams.clear();

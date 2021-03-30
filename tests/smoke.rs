@@ -1,26 +1,36 @@
 use anyhow::Result;
+use async_trait::async_trait;
+use futures::future::FutureExt;
+use futures::io::{AsyncRead, AsyncWrite};
 use libp2p::core::identity::Keypair;
 use libp2p::core::muxing::StreamMuxerBox;
-use libp2p::ping::{Ping, PingConfig};
+use libp2p::core::upgrade::{read_one, write_one};
+use libp2p::request_response::{
+    ProtocolName, ProtocolSupport, RequestResponse, RequestResponseCodec, RequestResponseConfig,
+};
 use libp2p::swarm::{Swarm, SwarmEvent};
 use libp2p::{Multiaddr, Transport};
 use libp2p_quic::QuicConfig;
-use std::time::Duration;
+use std::{io, iter};
 
-async fn create_swarm() -> Result<Swarm<Ping>> {
+async fn create_swarm() -> Result<Swarm<RequestResponse<PingCodec>>> {
     let keypair = Keypair::generate_ed25519();
     let transport = QuicConfig::new(&keypair)
         .listen_on("/ip4/127.0.0.1/udp/0/quic".parse()?)
         .await?
         .map(|(peer_id, muxer), _| (peer_id, StreamMuxerBox::new(muxer)))
         .boxed();
-    let behaviour = Ping::new(PingConfig::new().with_interval(Duration::from_millis(10)));
+
+    let protocols = iter::once((PingProtocol(), ProtocolSupport::Full));
+    let cfg = RequestResponseConfig::default();
+    let behaviour = RequestResponse::new(PingCodec(), protocols, cfg);
     let peer_id = keypair.public().into_peer_id();
+    tracing::info!("{}", peer_id);
     Ok(Swarm::new(transport, behaviour, peer_id))
 }
 
 #[async_std::test]
-async fn communicating_between_dialer_and_listener_swarm() -> Result<()> {
+async fn smoke() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .try_init()
@@ -30,8 +40,6 @@ async fn communicating_between_dialer_and_listener_swarm() -> Result<()> {
     let mut a = create_swarm().await?;
     let mut b = create_swarm().await?;
 
-    tracing::info!("created swarms");
-
     Swarm::listen_on(&mut a, Multiaddr::empty())?;
 
     let addr = match a.next_event().await {
@@ -39,7 +47,13 @@ async fn communicating_between_dialer_and_listener_swarm() -> Result<()> {
         e => panic!("{:?}", e),
     };
 
-    Swarm::dial_addr(&mut b, addr)?;
+    b.add_address(&Swarm::local_peer_id(&a), addr);
+    b.send_request(&Swarm::local_peer_id(&a), Ping(b"ping".to_vec()));
+
+    match b.next_event().await {
+        SwarmEvent::Dialing(_) => {}
+        e => panic!("{:?}", e),
+    }
 
     match a.next_event().await {
         SwarmEvent::IncomingConnection { .. } => {}
@@ -56,5 +70,90 @@ async fn communicating_between_dialer_and_listener_swarm() -> Result<()> {
         e => panic!("{:?}", e),
     };
 
+    tracing::info!("connected");
+
+    match a.next_event().await {
+        e => panic!("{:?}", e),
+    }
+
+    match a.next_event().await {
+        e => panic!("{:?}", e),
+    }
+
     Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct PingProtocol();
+
+#[derive(Clone)]
+struct PingCodec();
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Ping(Vec<u8>);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Pong(Vec<u8>);
+
+impl ProtocolName for PingProtocol {
+    fn protocol_name(&self) -> &[u8] {
+        "/ping/1".as_bytes()
+    }
+}
+
+#[async_trait]
+impl RequestResponseCodec for PingCodec {
+    type Protocol = PingProtocol;
+    type Request = Ping;
+    type Response = Pong;
+
+    async fn read_request<T>(&mut self, _: &PingProtocol, io: &mut T) -> io::Result<Self::Request>
+    where
+        T: AsyncRead + Unpin + Send,
+    {
+        read_one(io, 1024)
+            .map(|res| match res {
+                Err(e) => Err(io::Error::new(io::ErrorKind::InvalidData, e)),
+                Ok(vec) if vec.is_empty() => Err(io::ErrorKind::UnexpectedEof.into()),
+                Ok(vec) => Ok(Ping(vec)),
+            })
+            .await
+    }
+
+    async fn read_response<T>(&mut self, _: &PingProtocol, io: &mut T) -> io::Result<Self::Response>
+    where
+        T: AsyncRead + Unpin + Send,
+    {
+        read_one(io, 1024)
+            .map(|res| match res {
+                Err(e) => Err(io::Error::new(io::ErrorKind::InvalidData, e)),
+                Ok(vec) if vec.is_empty() => Err(io::ErrorKind::UnexpectedEof.into()),
+                Ok(vec) => Ok(Pong(vec)),
+            })
+            .await
+    }
+
+    async fn write_request<T>(
+        &mut self,
+        _: &PingProtocol,
+        io: &mut T,
+        Ping(data): Ping,
+    ) -> io::Result<()>
+    where
+        T: AsyncWrite + Unpin + Send,
+    {
+        write_one(io, data).await
+    }
+
+    async fn write_response<T>(
+        &mut self,
+        _: &PingProtocol,
+        io: &mut T,
+        Pong(data): Pong,
+    ) -> io::Result<()>
+    where
+        T: AsyncWrite + Unpin + Send,
+    {
+        write_one(io, data).await
+    }
 }

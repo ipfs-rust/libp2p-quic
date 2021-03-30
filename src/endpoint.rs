@@ -131,16 +131,18 @@ pub struct Endpoint {
 }
 
 impl Endpoint {
-    pub fn new(_config: QuicConfig, addr: SocketAddr) -> Result<Self, QuicError> {
+    pub fn new(config: QuicConfig, addr: SocketAddr) -> Result<Self, QuicError> {
         let mut transport = TransportConfig::default();
         transport.max_concurrent_uni_streams(0)?;
         let transport = Arc::new(transport);
 
-        let mut server_config = ServerConfig::default();
+        let mut server_config = ServerConfig::<NoiseSession>::default();
         server_config.transport = transport.clone();
+        server_config.crypto.keypair = config.keypair.clone();
 
-        let mut client_config = ClientConfig::default();
+        let mut client_config = ClientConfig::<NoiseSession>::default();
         client_config.transport = transport;
+        client_config.crypto.keypair = config.keypair;
 
         let endpoint_config = EndpointConfig::default();
 
@@ -211,7 +213,6 @@ async fn background_task(
 
     loop {
         if let Some(transmit) = endpoint.poll_transmit() {
-            tracing::trace!("sending endpoint packet");
             // TODO: set ECN
             // TODO: set src_ip
             // TODO: segment_size
@@ -229,7 +230,6 @@ async fn background_task(
             message = endpoint_channel.next_event().fuse() => {
                 match message {
                     Some(ToEndpoint::Dial { addr, tx: dial_tx }) => {
-                        tracing::trace!("dial");
                         let (id, connection) =
                             match endpoint.connect(client_config.clone(), addr, "server_name") {
                                 Ok(c) => c,
@@ -251,7 +251,6 @@ async fn background_task(
                         let _ = dial_tx.send(Ok(muxer));
                     }
                     Some(ToEndpoint::ConnectionEvent { connection_id, event }) => {
-                        tracing::trace!("connection event");
                         let is_drained_event = event.is_drained();
                         if is_drained_event {
                             connections.remove(&connection_id);
@@ -261,7 +260,6 @@ async fn background_task(
                         }
                     }
                     Some(ToEndpoint::Transmit(transmit)) => {
-                        tracing::trace!("send connection packet");
                         // TODO: set ECN
                         // TODO: set src_ip
                         // TODO: segment_size
@@ -275,7 +273,6 @@ async fn background_task(
                 }
             }
             result = socket.recv_from(&mut socket_recv_buffer).fuse() => {
-                tracing::trace!("received packet");
                 let (packet_len, packet_src) = match result {
                     Ok(v) => v,
                     Err(err) => {
@@ -289,11 +286,9 @@ async fn background_task(
                 match endpoint.handle(Instant::now(), packet_src, None, None, packet) {
                     None => {},
                     Some((id, DatagramEvent::ConnectionEvent(event))) => {
-                        tracing::trace!("endpoint event");
                         connections.get_mut(&id).unwrap().unbounded_send(event).ok();
                     },
                     Some((id, DatagramEvent::NewConnection(connection))) => {
-                        tracing::trace!("new connection");
                         let (tx, rx) = mpsc::unbounded();
                         connections.insert(id, tx);
                         let channel = ConnectionChannel {
