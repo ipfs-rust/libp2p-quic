@@ -51,5 +51,10 @@ async fn communicating_between_dialer_and_listener_swarm() -> Result<()> {
         e => panic!("{:?}", e),
     };
 
+    match a.next_event().await {
+        SwarmEvent::ConnectionEstablished { .. } => {}
+        e => panic!("{:?}", e),
+    };
+
     Ok(())
 }

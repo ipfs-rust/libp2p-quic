@@ -115,12 +115,13 @@ impl NoiseConfig {
         NoiseSession {
             state: Some(HandshakeState {
                 side,
+                state: State::ClientInit,
                 noise,
-                identity: Some(Identity {
+                transport_parameters: *params,
+                identity: Identity {
                     public_key: self.keypair.public().into_protobuf_encoding(),
                     signed_x25519_key,
-                }),
-                transport_parameters: Some(*params),
+                },
             }),
             remote_transport_parameters: None,
             remote_public_key: None,
@@ -141,15 +142,33 @@ impl Identity {
         w.put_slice(&self.signed_x25519_key);
     }
 
-    pub fn read<R: Buf>(r: &mut R, remote_static: &[u8]) -> Result<libp2p::core::identity::PublicKey> {
-        anyhow::ensure!(r.remaining() > 2, "identity too small: less than 2 remaining");
+    pub fn read<R: Buf>(
+        r: &mut R,
+        remote_static: &[u8],
+    ) -> Result<libp2p::core::identity::PublicKey> {
+        anyhow::ensure!(
+            r.remaining() > 2,
+            "identity too small: less than 2 remaining"
+        );
         let len = r.get_u16() as usize;
-        anyhow::ensure!(r.remaining() > len, "identity too small: less than {} remaining", len);
-        let public_key = libp2p::core::identity::PublicKey::from_protobuf_encoding(r.take(len).chunk())?;
-        anyhow::ensure!(r.remaining() > 2, "identity too small: less than 2 remaining");
+        anyhow::ensure!(
+            r.remaining() > len,
+            "identity too small: less than {} remaining",
+            len
+        );
+        let public_key =
+            libp2p::core::identity::PublicKey::from_protobuf_encoding(r.take(len).chunk())?;
+        anyhow::ensure!(
+            r.remaining() > 2,
+            "identity too small: less than 2 remaining"
+        );
         r.advance(len);
         let len = r.get_u16() as usize;
-        anyhow::ensure!(r.remaining() >= len, "identity too small: less than {} remaining", len);
+        anyhow::ensure!(
+            r.remaining() >= len,
+            "identity too small: less than {} remaining",
+            len
+        );
         let valid = public_key.verify(remote_static, r.take(len).chunk());
         anyhow::ensure!(valid, "invalid signature");
         r.advance(len);
@@ -159,9 +178,20 @@ impl Identity {
 
 struct HandshakeState {
     side: Side,
+    state: State,
     noise: snow::HandshakeState,
-    identity: Option<Identity>,
-    transport_parameters: Option<TransportParameters>,
+    transport_parameters: TransportParameters,
+    identity: Identity,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum State {
+    ClientInit,
+    ServerInit,
+    HandshakeKeysReady,
+    ServerHandshake,
+    ClientHandshake,
+    HandshakeComplete,
 }
 
 pub struct NoiseSession {
@@ -202,64 +232,137 @@ impl Session for NoiseSession {
     }
 
     fn read_handshake(&mut self, handshake: &[u8]) -> Result<bool, TransportError> {
-        let state = self.state.as_mut().unwrap();
-        tracing::debug!("{:?}: read_handshake", state.side);
-        let mut payload = vec![0; handshake.len()];
-        let size = state
-            .noise
-            .read_message(handshake, &mut payload)
-            .map_err(|err| TransportError {
-                code: TransportErrorCode::CONNECTION_REFUSED,
-                frame: None,
-                reason: err.to_string(),
-            })?;
-        payload.truncate(size);
-        let mut cursor = Cursor::new(&payload);
-        Ok(match (
-            state.side,
-            self.remote_transport_parameters.as_ref(),
-            self.remote_public_key.as_ref(),
-        ) {
-            (Side::Server, None, _) => {
+        let mut payload;
+        let state = self.state.as_mut().ok_or_else(|| TransportError {
+            code: TransportErrorCode::CONNECTION_REFUSED,
+            frame: None,
+            reason: "unexpected crypto frame".to_string(),
+        })?;
+        let mut cursor = if state.side == Side::Client && state.state == State::ServerHandshake {
+            Cursor::new(handshake)
+        } else {
+            payload = vec![0; handshake.len()];
+            let size = state
+                .noise
+                .read_message(handshake, &mut payload)
+                .map_err(|err| TransportError {
+                    code: TransportErrorCode::CONNECTION_REFUSED,
+                    frame: None,
+                    reason: err.to_string(),
+                })?;
+            payload.truncate(size);
+            Cursor::new(&payload[..])
+        };
+        match (state.side, state.state) {
+            (Side::Server, State::ClientInit) => {
                 self.remote_transport_parameters =
                     Some(TransportParameters::read(Side::Server, &mut cursor)?);
-                false
+                state.state = State::ServerInit;
+                Ok(false)
             }
-            (Side::Client, None, None) => {
-                let remote_static = state.noise.get_remote_static().unwrap();
-                let remote_public = Identity::read(&mut cursor, remote_static)
-                    .map_err(|err| TransportError {
-                        code: TransportErrorCode::CONNECTION_REFUSED,
-                        frame: None,
-                        reason: err.to_string(),
-                    })?;
-                self.remote_public_key = Some(remote_public);
+            (Side::Client, State::ServerInit) => {
                 self.remote_transport_parameters =
                     Some(TransportParameters::read(Side::Client, &mut cursor)?);
-                true
+                state.state = State::HandshakeKeysReady;
+                Ok(false)
             }
-            (Side::Server, Some(_params), None) => {
+            (Side::Client, State::ServerHandshake) => {
                 let remote_static = state.noise.get_remote_static().unwrap();
-                let remote_public = Identity::read(&mut cursor, remote_static)
-                    .map_err(|err| TransportError {
+                let remote_public =
+                    Identity::read(&mut cursor, remote_static).map_err(|err| TransportError {
                         code: TransportErrorCode::CONNECTION_REFUSED,
                         frame: None,
                         reason: err.to_string(),
                     })?;
                 self.remote_public_key = Some(remote_public);
-                true
+                state.state = State::ClientHandshake;
+                Ok(true)
             }
-            _ => unreachable!(),
-        })
+            (Side::Server, State::ClientHandshake) => {
+                let remote_static = state.noise.get_remote_static().unwrap();
+                let remote_public =
+                    Identity::read(&mut cursor, remote_static).map_err(|err| TransportError {
+                        code: TransportErrorCode::CONNECTION_REFUSED,
+                        frame: None,
+                        reason: err.to_string(),
+                    })?;
+                self.remote_public_key = Some(remote_public);
+                state.state = State::HandshakeComplete;
+                Ok(true)
+            }
+            _ => Err(TransportError {
+                code: TransportErrorCode::CONNECTION_REFUSED,
+                frame: None,
+                reason: "unexpected crypto frame".to_string(),
+            }),
+        }
     }
 
     fn write_handshake(&mut self, handshake: &mut Vec<u8>) -> Option<Keys<Self>> {
         let state = self.state.as_mut()?;
-        tracing::debug!("{:?}: write_handshake", state.side);
-        if state.noise.is_handshake_finished() {
+        let mut payload = vec![];
+        match (state.side, state.state) {
+            (Side::Client, State::ClientInit) => {
+                state.transport_parameters.write(&mut payload);
+                state.state = State::ServerInit;
+            }
+            (Side::Server, State::ClientInit) => {
+                return None;
+            }
+            (Side::Client, State::ServerInit) => {
+                return None;
+            }
+            (Side::Server, State::ServerInit) => {
+                state.transport_parameters.write(&mut payload);
+                state.state = State::ServerHandshake;
+            }
+            (Side::Client, State::HandshakeKeysReady) => {
+                state.state = State::ServerHandshake;
+            }
+            (Side::Server, State::HandshakeKeysReady) => {
+                unreachable!()
+            }
+            (Side::Client, State::ServerHandshake) => {
+                return None;
+            }
+            (Side::Server, State::ServerHandshake) => {
+                state.identity.write(&mut payload);
+                state.state = State::ClientHandshake;
+            }
+            (Side::Client, State::ClientHandshake) => {
+                state.identity.write(&mut payload);
+                state.state = State::HandshakeComplete;
+            }
+            (Side::Server, State::ClientHandshake) => {
+                return None;
+            }
+            (_, State::HandshakeComplete) => {}
+        };
+        if !payload.is_empty() {
+            if state.side == Side::Server && state.state == State::ClientHandshake {
+                handshake.extend_from_slice(&payload);
+            } else {
+                handshake.resize(1200, 0);
+                let size = state.noise.write_message(&payload, handshake).unwrap();
+                handshake.truncate(size);
+            }
+        }
+        if state.state == State::ServerHandshake {
+            let hash = state.noise.get_handshake_hash().to_vec();
+            Some(Keys {
+                header: KeyPair {
+                    local: PlaintextHeaderKey,
+                    remote: PlaintextHeaderKey,
+                },
+                packet: KeyPair {
+                    local: NoisePacketKey::Handshake(hash.clone()),
+                    remote: NoisePacketKey::Handshake(hash),
+                },
+            })
+        } else if state.state == State::HandshakeComplete {
             let state = self.state.take().unwrap();
             let key = Arc::new(state.noise.into_stateless_transport_mode().unwrap());
-            return Some(Keys {
+            Some(Keys {
                 header: KeyPair {
                     local: PlaintextHeaderKey,
                     remote: PlaintextHeaderKey,
@@ -268,45 +371,14 @@ impl Session for NoiseSession {
                     local: NoisePacketKey::Transport(key.clone()),
                     remote: NoisePacketKey::Transport(key),
                 },
-            });
+            })
+        } else {
+            None
         }
-        if !state.noise.is_my_turn() {
-            return None;
-        }
-        handshake.resize(1200, 0);
-        let mut payload = vec![];
-        match (
-            state.side,
-            state.transport_parameters.as_ref(),
-            state.identity.as_ref(),
-        ) {
-            (Side::Client, Some(params), _) => {
-                params.write(&mut payload);
-                state.transport_parameters.take();
-            }
-            (Side::Server, Some(params), Some(identity)) => {
-                identity.write(&mut payload);
-                state.identity.take();
-                params.write(&mut payload);
-                state.transport_parameters.take();
-            }
-            (Side::Client, None, Some(identity)) => {
-                identity.write(&mut payload);
-                state.identity.take();
-            }
-            _ => unreachable!(),
-        };
-        let size = state.noise.write_message(&payload, handshake).unwrap();
-        handshake.truncate(size);
-        None
     }
 
     fn is_handshaking(&self) -> bool {
-        if let Some(state) = self.state.as_ref() {
-            !state.noise.is_handshake_finished()
-        } else {
-            false
-        }
+        self.state.is_some()
     }
 
     fn peer_identity(&self) -> Option<Self::Identity> {
@@ -397,6 +469,8 @@ const RETRY_INTEGRITY_NONCE: [u8; 12] = [
 pub enum NoisePacketKey {
     /// Initial key for first packet. We send the first packet in plain text.
     Initial,
+    /// Handshake key used during the handshake.
+    Handshake(Vec<u8>),
     /// After the handshake is complete the noise state is used to encrypt packets.
     Transport(Arc<snow::StatelessTransportState>),
     /// When the key is exhausted due to integrity or confidentiality limits, the key
@@ -408,11 +482,14 @@ impl PacketKey for NoisePacketKey {
     fn encrypt(&self, packet: u64, buf: &mut [u8], header_len: usize) {
         match self {
             Self::Initial => {}
+            Self::Handshake(_hash) => {
+                // TODO: encrypt with handshake hash
+            }
             Self::Transport(state) => {
                 // TODO: provide the header as assiciated data
                 // TODO: mutate the buffer in place
                 let (_header, payload) = buf.split_at_mut(header_len);
-                let mut buffer = Vec::with_capacity(payload.len());
+                let mut buffer = vec![0; payload.len()];
                 let (content, _tag) = payload.split_at_mut(payload.len() - self.tag_len());
                 state.write_message(packet, content, &mut buffer).unwrap();
                 payload.copy_from_slice(&buffer);
@@ -429,6 +506,9 @@ impl PacketKey for NoisePacketKey {
     ) -> Result<(), CryptoError> {
         match self {
             Self::Initial => {}
+            Self::Handshake(_hash) => {
+                // TODO: decrypt with handshake hash
+            }
             Self::Transport(state) => {
                 // TODO: provide the header as assiciated data
                 // TODO: mutate the buffer in place
