@@ -14,6 +14,7 @@ use ring::aead;
 use std::future::Future;
 use std::io::Cursor;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use thiserror::Error;
 
@@ -141,15 +142,17 @@ impl Identity {
     }
 
     pub fn read<R: Buf>(r: &mut R, remote_static: &[u8]) -> Result<libp2p::core::identity::PublicKey> {
-        anyhow::ensure!(r.remaining() > 2, "identity too small");
+        anyhow::ensure!(r.remaining() > 2, "identity too small: less than 2 remaining");
         let len = r.get_u16() as usize;
-        anyhow::ensure!(r.remaining() > len, "identity too small");
+        anyhow::ensure!(r.remaining() > len, "identity too small: less than {} remaining", len);
         let public_key = libp2p::core::identity::PublicKey::from_protobuf_encoding(r.take(len).chunk())?;
-        anyhow::ensure!(r.remaining() > 2, "identity too small");
+        anyhow::ensure!(r.remaining() > 2, "identity too small: less than 2 remaining");
+        r.advance(len);
         let len = r.get_u16() as usize;
-        anyhow::ensure!(r.remaining() > len, "identity too small");
+        anyhow::ensure!(r.remaining() >= len, "identity too small: less than {} remaining", len);
         let valid = public_key.verify(remote_static, r.take(len).chunk());
         anyhow::ensure!(valid, "invalid signature");
+        r.advance(len);
         Ok(public_key)
     }
 }
@@ -200,7 +203,7 @@ impl Session for NoiseSession {
 
     fn read_handshake(&mut self, handshake: &[u8]) -> Result<bool, TransportError> {
         let state = self.state.as_mut().unwrap();
-        tracing::trace!("{:?}: read_handshake", state.side);
+        tracing::debug!("{:?}: read_handshake", state.side);
         let mut payload = vec![0; handshake.len()];
         let size = state
             .noise
@@ -212,18 +215,17 @@ impl Session for NoiseSession {
             })?;
         payload.truncate(size);
         let mut cursor = Cursor::new(&payload);
-        match (
+        Ok(match (
             state.side,
             self.remote_transport_parameters.as_ref(),
             self.remote_public_key.as_ref(),
         ) {
             (Side::Server, None, _) => {
                 self.remote_transport_parameters =
-                    Some(TransportParameters::read(Side::Client, &mut cursor)?);
+                    Some(TransportParameters::read(Side::Server, &mut cursor)?);
+                false
             }
             (Side::Client, None, None) => {
-                self.remote_transport_parameters =
-                    Some(TransportParameters::read(Side::Server, &mut cursor)?);
                 let remote_static = state.noise.get_remote_static().unwrap();
                 let remote_public = Identity::read(&mut cursor, remote_static)
                     .map_err(|err| TransportError {
@@ -232,6 +234,9 @@ impl Session for NoiseSession {
                         reason: err.to_string(),
                     })?;
                 self.remote_public_key = Some(remote_public);
+                self.remote_transport_parameters =
+                    Some(TransportParameters::read(Side::Client, &mut cursor)?);
+                true
             }
             (Side::Server, Some(_params), None) => {
                 let remote_static = state.noise.get_remote_static().unwrap();
@@ -242,15 +247,29 @@ impl Session for NoiseSession {
                         reason: err.to_string(),
                     })?;
                 self.remote_public_key = Some(remote_public);
+                true
             }
-            _ => {}
-        };
-        Ok(state.noise.is_handshake_finished())
+            _ => unreachable!(),
+        })
     }
 
     fn write_handshake(&mut self, handshake: &mut Vec<u8>) -> Option<Keys<Self>> {
-        let state = self.state.as_mut().unwrap();
-        tracing::trace!("{:?}: write_handshake", state.side);
+        let state = self.state.as_mut()?;
+        tracing::debug!("{:?}: write_handshake", state.side);
+        if state.noise.is_handshake_finished() {
+            let state = self.state.take().unwrap();
+            let key = Arc::new(state.noise.into_stateless_transport_mode().unwrap());
+            return Some(Keys {
+                header: KeyPair {
+                    local: PlaintextHeaderKey,
+                    remote: PlaintextHeaderKey,
+                },
+                packet: KeyPair {
+                    local: NoisePacketKey::Transport(key.clone()),
+                    remote: NoisePacketKey::Transport(key),
+                },
+            });
+        }
         if !state.noise.is_my_turn() {
             return None;
         }
@@ -266,31 +285,20 @@ impl Session for NoiseSession {
                 state.transport_parameters.take();
             }
             (Side::Server, Some(params), Some(identity)) => {
-                params.write(&mut payload);
-                state.transport_parameters.take();
                 identity.write(&mut payload);
                 state.identity.take();
+                params.write(&mut payload);
+                state.transport_parameters.take();
             }
             (Side::Client, None, Some(identity)) => {
                 identity.write(&mut payload);
                 state.identity.take();
             }
-            _ => {}
+            _ => unreachable!(),
         };
         let size = state.noise.write_message(&payload, handshake).unwrap();
         handshake.truncate(size);
         None
-        /*let hash = state.noise.get_handshake_hash().to_vec();
-        Some(Keys {
-            header: KeyPair {
-                local: PlaintextHeaderKey,
-                remote: PlaintextHeaderKey,
-            },
-            packet: KeyPair {
-                local: NoisePacketKey::Handshake(hash.clone()),
-                remote: NoisePacketKey::Handshake(hash),
-            },
-        })*/
     }
 
     fn is_handshaking(&self) -> bool {
@@ -389,11 +397,8 @@ const RETRY_INTEGRITY_NONCE: [u8; 12] = [
 pub enum NoisePacketKey {
     /// Initial key for first packet. We send the first packet in plain text.
     Initial,
-    /// Key used during handshake. The handshake hash is used to encrypt the
-    /// packet.
-    Handshake(Vec<u8>),
     /// After the handshake is complete the noise state is used to encrypt packets.
-    Transport(snow::StatelessTransportState),
+    Transport(Arc<snow::StatelessTransportState>),
     /// When the key is exhausted due to integrity or confidentiality limits, the key
     /// is rotated.
     NextKey,
@@ -403,9 +408,6 @@ impl PacketKey for NoisePacketKey {
     fn encrypt(&self, packet: u64, buf: &mut [u8], header_len: usize) {
         match self {
             Self::Initial => {}
-            Self::Handshake(_hash) => {
-                // TODO: encrypt payload with handshake hash
-            }
             Self::Transport(state) => {
                 // TODO: provide the header as assiciated data
                 // TODO: mutate the buffer in place
@@ -427,9 +429,6 @@ impl PacketKey for NoisePacketKey {
     ) -> Result<(), CryptoError> {
         match self {
             Self::Initial => {}
-            Self::Handshake(_hash) => {
-                // TODO: decrypt payload with handshake hash
-            }
             Self::Transport(state) => {
                 // TODO: provide the header as assiciated data
                 // TODO: mutate the buffer in place
