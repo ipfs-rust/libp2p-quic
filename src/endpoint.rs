@@ -1,5 +1,5 @@
 use crate::muxer::QuicMuxer;
-use crate::noise::NoiseSession;
+use crate::noise::{NoiseConfig, NoiseSession};
 use crate::{QuicConfig, QuicError};
 use async_io::Async;
 use fnv::FnvHashMap;
@@ -133,11 +133,20 @@ impl Endpoint {
 
         let mut server_config = ServerConfig::<NoiseSession>::default();
         server_config.transport = transport.clone();
-        server_config.crypto.keypair = config.keypair.clone();
+        server_config.crypto = NoiseConfig {
+            params: config.noise.clone(),
+            keypair: config.keypair.clone(),
+            prologue: config.prologue.clone(),
+        };
 
-        let mut client_config = ClientConfig::<NoiseSession>::default();
-        client_config.transport = transport;
-        client_config.crypto.keypair = config.keypair;
+        let client_config = ClientConfig::<NoiseSession> {
+            transport,
+            crypto: NoiseConfig {
+                params: config.noise,
+                keypair: config.keypair,
+                prologue: config.prologue,
+            },
+        };
 
         let endpoint_config = EndpointConfig::default();
 

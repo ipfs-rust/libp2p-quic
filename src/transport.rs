@@ -35,8 +35,7 @@ impl QuicTransport {
         } else {
             Addresses::Ip(Some(socket_addr.ip()))
         };
-        let endpoint =
-            Endpoint::new(config, socket_addr).map_err(|err| TransportError::Other(err.into()))?;
+        let endpoint = Endpoint::new(config, socket_addr).map_err(TransportError::Other)?;
         Ok(Self {
             inner: Arc::new(Mutex::new(QuicTransportInner {
                 channel: endpoint.spawn(),
@@ -129,6 +128,7 @@ impl Stream for QuicTransport {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 pub enum QuicDial {
     Connecting(oneshot::Receiver<Result<QuicMuxer, QuicError>>),
     Upgrading(NoiseUpgrade),

@@ -50,6 +50,7 @@ pub type IdentityKeypair = libp2p::core::identity::Keypair;
 pub struct NoiseConfig {
     pub(crate) params: snow::params::NoiseParams,
     pub(crate) keypair: IdentityKeypair,
+    pub(crate) prologue: Vec<u8>,
 }
 
 impl std::fmt::Debug for NoiseConfig {
@@ -57,6 +58,7 @@ impl std::fmt::Debug for NoiseConfig {
         f.debug_struct("NoiseConfig")
             .field("params", &self.params)
             .field("keypair", &self.keypair.public().into_peer_id().to_string())
+            .field("prologue", &self.prologue)
             .finish()
     }
 }
@@ -66,6 +68,7 @@ impl NoiseConfig {
         Self {
             params: "Noise_XX_25519_AESGCM_SHA256".parse().unwrap(),
             keypair: IdentityKeypair::generate_ed25519(),
+            prologue: Default::default(),
         }
     }
 }
@@ -96,7 +99,7 @@ impl ServerConfig<NoiseSession> for NoiseConfig {
 
 impl NoiseConfig {
     fn start_session(&self, side: Side, params: &TransportParameters) -> NoiseSession {
-        let builder = snow::Builder::new(self.params.clone());
+        let builder = snow::Builder::new(self.params.clone()).prologue(&self.prologue);
         let x25519 = builder.generate_keypair().unwrap();
         let builder = builder.local_private_key(&x25519.private);
         let signed_x25519_key = self.keypair.sign(&x25519.public).unwrap();
