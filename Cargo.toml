@@ -3,6 +3,9 @@ name = "libp2p-quic"
 version = "0.1.0"
 authors = ["David Craven <david@craven.ch>"]
 edition = "2018"
+description = "libp2p-quic is a noise based quic implementation for rust-libp2p."
+repository = "https://github.com/ipfs-rust/libp2p-quic"
+license = "ISC"
 
 [dependencies]
 anyhow = "1.0.40"
