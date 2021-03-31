@@ -5,7 +5,8 @@ use crate::{QuicConfig, QuicError};
 use futures::channel::oneshot;
 use futures::prelude::*;
 use if_watch::{IfEvent, IfWatcher};
-use libp2p::core::transport::{ListenerEvent, Transport, TransportError};
+use libp2p::core::muxing::StreamMuxerBox;
+use libp2p::core::transport::{Boxed, ListenerEvent, Transport, TransportError};
 use libp2p::multiaddr::{Multiaddr, Protocol};
 use libp2p::PeerId;
 use parking_lot::Mutex;
@@ -42,6 +43,14 @@ impl QuicTransport {
                 addresses,
             })),
         })
+    }
+
+    /// Creates a boxed libp2p transport.
+    pub fn boxed(self) -> Boxed<(PeerId, StreamMuxerBox)> {
+        Transport::map(self, |(peer_id, muxer), _| {
+            (peer_id, StreamMuxerBox::new(muxer))
+        })
+        .boxed()
     }
 }
 

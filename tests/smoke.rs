@@ -3,14 +3,13 @@ use async_trait::async_trait;
 use futures::future::FutureExt;
 use futures::io::{AsyncRead, AsyncWrite};
 use libp2p::core::identity::Keypair;
-use libp2p::core::muxing::StreamMuxerBox;
 use libp2p::core::upgrade::{read_one, write_one};
 use libp2p::request_response::{
     ProtocolName, ProtocolSupport, RequestResponse, RequestResponseCodec, RequestResponseConfig,
     RequestResponseEvent, RequestResponseMessage,
 };
 use libp2p::swarm::{Swarm, SwarmEvent};
-use libp2p::{Multiaddr, Transport};
+use libp2p::Multiaddr;
 use libp2p_quic::QuicConfig;
 use std::{io, iter};
 
@@ -19,7 +18,6 @@ async fn create_swarm() -> Result<Swarm<RequestResponse<PingCodec>>> {
     let transport = QuicConfig::new(&keypair)
         .listen_on("/ip4/127.0.0.1/udp/0/quic".parse()?)
         .await?
-        .map(|(peer_id, muxer), _| (peer_id, StreamMuxerBox::new(muxer)))
         .boxed();
 
     let protocols = iter::once((PingProtocol(), ProtocolSupport::Full));
