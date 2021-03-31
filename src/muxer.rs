@@ -178,7 +178,14 @@ impl StreamMuxer for QuicMuxer {
                     }
                 }
                 Event::Stream(StreamEvent::Finished { id }) => {
-                    inner.substreams.remove(&id);
+                    if let Some(substream) = inner.substreams.get_mut(&id) {
+                        if let Some(waker) = substream.read_waker.take() {
+                            waker.wake();
+                        }
+                        if let Some(waker) = substream.write_waker.take() {
+                            waker.wake();
+                        }
+                    }
                 }
                 Event::Stream(StreamEvent::Stopped { id, error_code }) => {
                     tracing::debug!("substream {} stopped with error {}", id, error_code);
@@ -339,8 +346,9 @@ impl StreamMuxer for QuicMuxer {
         }
     }
 
-    fn destroy_substream(&self, _id: Self::Substream) {
-        // noop - substreams are removed when quinn says so
+    fn destroy_substream(&self, id: Self::Substream) {
+        let mut inner = self.inner.lock();
+        inner.substreams.remove(&id);
     }
 
     fn flush_substream(
@@ -358,6 +366,7 @@ impl StreamMuxer for QuicMuxer {
     }
 
     fn close(&self, cx: &mut Context) -> Poll<Result<(), Self::Error>> {
+        tracing::trace!("closing muxer");
         let mut inner = self.inner.lock();
         if inner.substreams.is_empty() {
             return Poll::Ready(Ok(()));

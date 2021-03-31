@@ -1,11 +1,10 @@
-use crate::endpoint::{Endpoint, QuicError, TransportChannel};
+use crate::endpoint::{Endpoint, TransportChannel};
 use crate::muxer::QuicMuxer;
 use crate::noise::NoiseUpgrade;
-use anyhow::Result;
+use crate::{QuicConfig, QuicError};
 use futures::channel::oneshot;
 use futures::prelude::*;
 use if_watch::{IfEvent, IfWatcher};
-use libp2p::core::identity::Keypair;
 use libp2p::core::transport::{ListenerEvent, Transport, TransportError};
 use libp2p::multiaddr::{Multiaddr, Protocol};
 use libp2p::PeerId;
@@ -15,57 +14,36 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-/// Quic configuration.
 #[derive(Clone)]
-pub struct QuicConfig {
-    pub keypair: Keypair,
+pub struct QuicTransport {
+    inner: Arc<Mutex<QuicTransportInner>>,
 }
 
-impl Default for QuicConfig {
-    fn default() -> Self {
-        Self {
-            keypair: Keypair::generate_ed25519(),
-        }
-    }
-}
-
-impl std::fmt::Debug for QuicConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        f.debug_struct("QuicConfig")
-            .field("keypair", &self.keypair.public())
-            .finish()
-    }
-}
-
-impl QuicConfig {
-    /// Creates a new config from a keypair.
-    pub fn new(keypair: &Keypair) -> Self {
-        Self {
-            keypair: keypair.clone(),
-        }
-    }
-
-    /// Spawns a new endpoint.
-    pub async fn listen_on(self, addr: Multiaddr) -> Result<QuicTransport> {
+impl QuicTransport {
+    /// Creates a new quic transport.
+    pub async fn new(
+        config: QuicConfig,
+        addr: Multiaddr,
+    ) -> Result<Self, TransportError<QuicError>> {
         let socket_addr = multiaddr_to_socketaddr(&addr)
-            .map_err(|_| TransportError::MultiaddrNotSupported::<QuicError>(addr.clone()))?;
+            .map_err(|_| TransportError::MultiaddrNotSupported(addr.clone()))?;
         let addresses = if socket_addr.ip().is_unspecified() {
-            Addresses::Unspecified(IfWatcher::new().await?)
+            let watcher = IfWatcher::new()
+                .await
+                .map_err(|err| TransportError::Other(err.into()))?;
+            Addresses::Unspecified(watcher)
         } else {
             Addresses::Ip(Some(socket_addr.ip()))
         };
-        Ok(QuicTransport {
+        let endpoint =
+            Endpoint::new(config, socket_addr).map_err(|err| TransportError::Other(err.into()))?;
+        Ok(Self {
             inner: Arc::new(Mutex::new(QuicTransportInner {
-                channel: Endpoint::new(self, socket_addr)?.spawn(),
+                channel: endpoint.spawn(),
                 addresses,
             })),
         })
     }
-}
-
-#[derive(Clone)]
-pub struct QuicTransport {
-    inner: Arc<Mutex<QuicTransportInner>>,
 }
 
 impl std::fmt::Debug for QuicTransport {

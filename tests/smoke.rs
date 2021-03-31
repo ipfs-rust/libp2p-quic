@@ -7,6 +7,7 @@ use libp2p::core::muxing::StreamMuxerBox;
 use libp2p::core::upgrade::{read_one, write_one};
 use libp2p::request_response::{
     ProtocolName, ProtocolSupport, RequestResponse, RequestResponseCodec, RequestResponseConfig,
+    RequestResponseEvent, RequestResponseMessage,
 };
 use libp2p::swarm::{Swarm, SwarmEvent};
 use libp2p::{Multiaddr, Transport};
@@ -48,7 +49,7 @@ async fn smoke() -> Result<()> {
     };
 
     b.add_address(&Swarm::local_peer_id(&a), addr);
-    b.send_request(&Swarm::local_peer_id(&a), Ping(b"ping".to_vec()));
+    b.send_request(&Swarm::local_peer_id(&a), Ping(b"hello world".to_vec()));
 
     match b.next_event().await {
         SwarmEvent::Dialing(_) => {}
@@ -70,13 +71,39 @@ async fn smoke() -> Result<()> {
         e => panic!("{:?}", e),
     };
 
-    tracing::info!("connected");
+    assert!(b.next_event().now_or_never().is_none());
 
     match a.next_event().await {
+        SwarmEvent::Behaviour(RequestResponseEvent::Message {
+            message:
+                RequestResponseMessage::Request {
+                    request: Ping(data),
+                    channel,
+                    ..
+                },
+            ..
+        }) => {
+            a.send_response(channel, Pong(data)).unwrap();
+        }
+        e => panic!("{:?}", e),
+    }
+
+    assert!(a.next_event().now_or_never().is_none());
+
+    match b.next_event().await {
+        SwarmEvent::Behaviour(RequestResponseEvent::Message {
+            message:
+                RequestResponseMessage::Response {
+                    response: Pong(data),
+                    ..
+                },
+            ..
+        }) => assert_eq!(data, b"hello world".to_vec()),
         e => panic!("{:?}", e),
     }
 
     match a.next_event().await {
+        SwarmEvent::Behaviour(RequestResponseEvent::ResponseSent { .. }) => {}
         e => panic!("{:?}", e),
     }
 

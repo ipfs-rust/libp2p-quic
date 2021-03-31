@@ -1,21 +1,17 @@
 use crate::muxer::QuicMuxer;
 use crate::noise::NoiseSession;
-use crate::transport::QuicConfig;
+use crate::{QuicConfig, QuicError};
 use async_io::Async;
 use fnv::FnvHashMap;
 use futures::channel::{mpsc, oneshot};
 use futures::prelude::*;
 use quinn_proto::generic::{ClientConfig, EndpointConfig, ServerConfig};
-use quinn_proto::{
-    ConfigError, ConnectError, ConnectionEvent, ConnectionHandle, DatagramEvent, EndpointEvent,
-    Transmit, TransportConfig,
-};
+use quinn_proto::{ConnectionEvent, ConnectionHandle, DatagramEvent, EndpointEvent, Transmit};
 use std::net::{SocketAddr, UdpSocket};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Instant;
-use thiserror::Error;
 
 /// Message sent to the endpoint background task.
 #[derive(Debug)]
@@ -131,10 +127,9 @@ pub struct Endpoint {
 }
 
 impl Endpoint {
-    pub fn new(config: QuicConfig, addr: SocketAddr) -> Result<Self, QuicError> {
-        let mut transport = TransportConfig::default();
-        transport.max_concurrent_uni_streams(0)?;
-        let transport = Arc::new(transport);
+    pub fn new(mut config: QuicConfig, addr: SocketAddr) -> Result<Self, QuicError> {
+        config.transport.max_concurrent_uni_streams(0)?;
+        let transport = Arc::new(config.transport);
 
         let mut server_config = ServerConfig::<NoiseSession>::default();
         server_config.transport = transport.clone();
@@ -185,20 +180,6 @@ impl Endpoint {
         .detach();
         transport
     }
-}
-
-#[derive(Debug, Error)]
-pub enum QuicError {
-    #[error("{0}")]
-    Config(#[from] ConfigError),
-    #[error("{0}")]
-    Connect(#[from] ConnectError),
-    #[error("{0}")]
-    Muxer(#[from] crate::muxer::QuicMuxerError),
-    #[error("{0}")]
-    Noise(#[from] crate::noise::NoiseUpgradeError),
-    #[error("{0}")]
-    Io(#[from] std::io::Error),
 }
 
 async fn background_task(

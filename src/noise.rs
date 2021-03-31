@@ -1,6 +1,4 @@
-use crate::endpoint::QuicError;
-use crate::muxer::QuicMuxer;
-use anyhow::Result;
+use crate::{QuicError, QuicMuxer};
 use bytes::{Buf, BufMut, BytesMut};
 use libp2p::core::StreamMuxer;
 use libp2p::PeerId;
@@ -16,7 +14,6 @@ use std::io::Cursor;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use thiserror::Error;
 
 pub struct NoiseUpgrade(Option<QuicMuxer>);
 
@@ -32,7 +29,7 @@ impl Future for NoiseUpgrade {
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
         let muxer = self.0.as_ref().unwrap();
         match muxer.poll_event(cx) {
-            Poll::Ready(Ok(_)) => Poll::Ready(Err(NoiseUpgradeError.into())),
+            Poll::Ready(Ok(_)) => Poll::Ready(Err(QuicError::UpgradeError)),
             Poll::Ready(Err(err)) => Poll::Ready(Err(err.into())),
             Poll::Pending => {
                 if !muxer.is_handshaking() {
@@ -46,10 +43,6 @@ impl Future for NoiseUpgrade {
         }
     }
 }
-
-#[derive(Debug, Error)]
-#[error("a `StreamMuxerEvent` was generated before the handshake was complete.")]
-pub struct NoiseUpgradeError;
 
 pub type IdentityKeypair = libp2p::core::identity::Keypair;
 
@@ -145,7 +138,7 @@ impl Identity {
     pub fn read<R: Buf>(
         r: &mut R,
         remote_static: &[u8],
-    ) -> Result<libp2p::core::identity::PublicKey> {
+    ) -> anyhow::Result<libp2p::core::identity::PublicKey> {
         anyhow::ensure!(
             r.remaining() > 2,
             "identity too small: less than 2 remaining"
