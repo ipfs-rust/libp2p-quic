@@ -181,7 +181,6 @@ impl StreamMuxer for QuicMuxer {
                         .accept(Dir::Bi)
                         .expect("received opened event");
                     inner.substreams.insert(id, Default::default());
-                    tracing::info!("opened {}", id);
                     return Poll::Ready(Ok(StreamMuxerEvent::InboundSubstream(id)));
                 }
                 Event::Stream(StreamEvent::Readable { id }) => {
@@ -200,7 +199,6 @@ impl StreamMuxer for QuicMuxer {
                     }
                 }
                 Event::Stream(StreamEvent::Finished { id }) => {
-                    tracing::info!("finished {}", id);
                     if let Some(substream) = inner.substreams.get_mut(&id) {
                         substream.half_closed = true;
                         if let Some(waker) = substream.read_waker.take() {
@@ -217,7 +215,6 @@ impl StreamMuxer for QuicMuxer {
                     return Poll::Ready(Err(QuicMuxerError::StreamStopped { id, error_code }));
                 }
                 Event::Stream(StreamEvent::Available { dir: Dir::Bi }) => {
-                    tracing::info!("substream available");
                     if let Some(OutboundSubstreamState::Pending(waker)) =
                         inner.pending_substream.take()
                     {
@@ -266,11 +263,9 @@ impl StreamMuxer for QuicMuxer {
         assert!(inner.pending_substream.take().is_some());
 
         if let Some(id) = inner.connection.streams().open(Dir::Bi) {
-            tracing::info!("opened {}", id);
             inner.substreams.insert(id, Default::default());
             Poll::Ready(Ok(id))
         } else {
-            tracing::info!("no available substreams");
             inner.pending_substream = Some(OutboundSubstreamState::Pending(cx.waker().clone()));
             Poll::Pending
         }
@@ -296,7 +291,6 @@ impl StreamMuxer for QuicMuxer {
         let mut chunks = match stream.read(true) {
             Ok(chunks) => chunks,
             Err(ReadableError::UnknownStream) => {
-                tracing::info!("read on unknown stream {}", id);
                 return Poll::Ready(Err(QuicMuxerError::UnknownStream { id: *id }))
             }
             Err(ReadableError::IllegalOrderedRead) => {
@@ -308,7 +302,6 @@ impl StreamMuxer for QuicMuxer {
         let mut readable = true;
         loop {
             if buf.is_empty() {
-                tracing::info!("breaking early due to too small buffer {}", id);
                 break;
             }
             match chunks.next(buf.len()) {
@@ -341,7 +334,6 @@ impl StreamMuxer for QuicMuxer {
             substream.read_waker = Some(cx.waker().clone());
             Poll::Pending
         } else {
-            tracing::info!("read {} {}", id, bytes);
             substream.readable = readable;
             Poll::Ready(Ok(bytes))
         }
@@ -355,10 +347,7 @@ impl StreamMuxer for QuicMuxer {
     ) -> Poll<Result<usize, Self::Error>> {
         let mut inner = self.inner.lock();
         match inner.connection.send_stream(*id).write(buf) {
-            Ok(bytes) => {
-                tracing::info!("write {} {}/{}", id, bytes, buf.len());
-                Poll::Ready(Ok(bytes))
-            }
+            Ok(bytes) => Poll::Ready(Ok(bytes)),
             Err(WriteError::Blocked) => {
                 let mut substream = inner.substreams.get_mut(id).unwrap();
                 substream.write_waker = Some(cx.waker().clone());
@@ -366,7 +355,6 @@ impl StreamMuxer for QuicMuxer {
             }
             Err(WriteError::Stopped(_)) => Poll::Ready(Ok(0)),
             Err(WriteError::UnknownStream) => {
-                tracing::info!("write on unknown stream {}", id);
                 Poll::Ready(Err(QuicMuxerError::UnknownStream { id: *id }))
             }
         }
@@ -384,7 +372,6 @@ impl StreamMuxer for QuicMuxer {
             Ok(()) => Poll::Ready(Ok(())),
             Err(FinishError::Stopped(_)) => Poll::Ready(Ok(())),
             Err(FinishError::UnknownStream) => {
-                tracing::info!("shutdown on unknown stream {}", id);
                 Poll::Ready(Err(QuicMuxerError::UnknownStream { id: *id }))
             }
         }
