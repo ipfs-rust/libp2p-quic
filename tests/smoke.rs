@@ -11,6 +11,7 @@ use libp2p::request_response::{
 use libp2p::swarm::{Swarm, SwarmEvent};
 use libp2p::Multiaddr;
 use libp2p_quic::QuicConfig;
+use rand::RngCore;
 use std::{io, iter};
 
 async fn create_swarm() -> Result<Swarm<RequestResponse<PingCodec>>> {
@@ -35,6 +36,7 @@ async fn smoke() -> Result<()> {
         .try_init()
         .ok();
     log_panics::init();
+    let mut rng = rand::thread_rng();
 
     let mut a = create_swarm().await?;
     let mut b = create_swarm().await?;
@@ -46,8 +48,11 @@ async fn smoke() -> Result<()> {
         e => panic!("{:?}", e),
     };
 
+    let mut data = vec![0; 4096 * 10];
+    rng.fill_bytes(&mut data);
+
     b.add_address(&Swarm::local_peer_id(&a), addr);
-    b.send_request(&Swarm::local_peer_id(&a), Ping(b"hello world".to_vec()));
+    b.send_request(&Swarm::local_peer_id(&a), Ping(data.clone()));
 
     match b.next_event().await {
         SwarmEvent::Dialing(_) => {}
@@ -75,20 +80,59 @@ async fn smoke() -> Result<()> {
         SwarmEvent::Behaviour(RequestResponseEvent::Message {
             message:
                 RequestResponseMessage::Request {
+                    request: Ping(ping),
+                    channel,
+                    ..
+                },
+            ..
+        }) => {
+            a.send_response(channel, Pong(ping)).unwrap();
+        }
+        e => panic!("{:?}", e),
+    }
+
+    match a.next_event().await {
+        SwarmEvent::Behaviour(RequestResponseEvent::ResponseSent { .. }) => {}
+        e => panic!("{:?}", e),
+    }
+
+    match b.next_event().await {
+        SwarmEvent::Behaviour(RequestResponseEvent::Message {
+            message:
+                RequestResponseMessage::Response {
+                    response: Pong(pong),
+                    ..
+                },
+            ..
+        }) => assert_eq!(data, pong),
+        e => panic!("{:?}", e),
+    }
+
+    a.send_request(&Swarm::local_peer_id(&b), Ping(b"another substream".to_vec()));
+
+    assert!(a.next_event().now_or_never().is_none());
+
+    match b.next_event().await {
+        SwarmEvent::Behaviour(RequestResponseEvent::Message {
+            message:
+                RequestResponseMessage::Request {
                     request: Ping(data),
                     channel,
                     ..
                 },
             ..
         }) => {
-            a.send_response(channel, Pong(data)).unwrap();
+            b.send_response(channel, Pong(data)).unwrap();
         }
         e => panic!("{:?}", e),
     }
 
-    assert!(a.next_event().now_or_never().is_none());
-
     match b.next_event().await {
+        SwarmEvent::Behaviour(RequestResponseEvent::ResponseSent { .. }) => {}
+        e => panic!("{:?}", e),
+    }
+
+    match a.next_event().await {
         SwarmEvent::Behaviour(RequestResponseEvent::Message {
             message:
                 RequestResponseMessage::Response {
@@ -96,12 +140,7 @@ async fn smoke() -> Result<()> {
                     ..
                 },
             ..
-        }) => assert_eq!(data, b"hello world".to_vec()),
-        e => panic!("{:?}", e),
-    }
-
-    match a.next_event().await {
-        SwarmEvent::Behaviour(RequestResponseEvent::ResponseSent { .. }) => {}
+        }) => assert_eq!(data, b"another substream".to_vec()),
         e => panic!("{:?}", e),
     }
 
@@ -136,7 +175,7 @@ impl RequestResponseCodec for PingCodec {
     where
         T: AsyncRead + Unpin + Send,
     {
-        read_one(io, 1024)
+        read_one(io, 4096 * 10)
             .map(|res| match res {
                 Err(e) => Err(io::Error::new(io::ErrorKind::InvalidData, e)),
                 Ok(vec) if vec.is_empty() => Err(io::ErrorKind::UnexpectedEof.into()),
@@ -149,7 +188,7 @@ impl RequestResponseCodec for PingCodec {
     where
         T: AsyncRead + Unpin + Send,
     {
-        read_one(io, 1024)
+        read_one(io, 4096 * 10)
             .map(|res| match res {
                 Err(e) => Err(io::Error::new(io::ErrorKind::InvalidData, e)),
                 Ok(vec) if vec.is_empty() => Err(io::ErrorKind::UnexpectedEof.into()),

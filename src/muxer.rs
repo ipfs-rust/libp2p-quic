@@ -42,6 +42,8 @@ struct QuicMuxerInner {
     pending_substream: Option<OutboundSubstreamState>,
     /// Close waker.
     close_waker: Option<Waker>,
+    /// Connected.
+    connected: bool,
 }
 
 /// State of a single substream.
@@ -71,6 +73,7 @@ impl QuicMuxer {
                 substreams: Default::default(),
                 pending_substream: None,
                 close_waker: None,
+                connected: false,
             }),
         }
     }
@@ -114,16 +117,7 @@ impl StreamMuxer for QuicMuxer {
         cx: &mut Context,
     ) -> Poll<Result<StreamMuxerEvent<Self::Substream>, Self::Error>> {
         let mut inner = self.inner.lock();
-        let mut now = Instant::now();
-
-        if let Some(timer) = inner.timer.as_mut() {
-            if let Poll::Ready(expired) = Pin::new(timer).poll(cx) {
-                if expired > now {
-                    now = expired;
-                }
-                inner.connection.handle_timeout(now);
-            }
-        }
+        let now = Instant::now();
 
         while let Poll::Ready(event) = inner.endpoint.poll_channel_events(cx) {
             inner.connection.handle_event(event);
@@ -133,18 +127,38 @@ impl StreamMuxer for QuicMuxer {
             inner.endpoint.send_transmit(transmit);
         }
 
-        if let Some(timeout) = inner.connection.poll_timeout() {
-            inner.timer = Some(Timer::at(timeout));
+        loop {
+            if let Some(timer) = inner.timer.as_mut() {
+                match  Pin::new(timer).poll(cx) {
+                    Poll::Ready(expired) => {
+                        inner.connection.handle_timeout(expired);
+                        inner.timer = None;
+                    }
+                    Poll::Pending => break,
+                }
+            } else if let Some(when) = inner.connection.poll_timeout() {
+                inner.timer = Some(Timer::at(when));
+            } else {
+                break;
+            }
         }
 
         while let Some(event) = inner.connection.poll_endpoint_events() {
             inner.endpoint.send_endpoint_event(event);
         }
 
-        while let Some(event) = inner.connection.poll() {
+        while let Some(event) = {
+            if inner.connected {
+                inner.connection.poll()
+            } else {
+                inner.connection.poll_connection()
+            }
+        }
+        {
             match event {
                 Event::HandshakeDataReady => {}
                 Event::Connected => {
+                    inner.connected = true;
                     // Break here so that the noise upgrade can finish.
                     return Poll::Pending;
                 }
@@ -166,15 +180,17 @@ impl StreamMuxer for QuicMuxer {
                     return Poll::Ready(Ok(StreamMuxerEvent::InboundSubstream(id)));
                 }
                 Event::Stream(StreamEvent::Readable { id }) => {
-                    let substream = inner.substreams.get_mut(&id).unwrap();
-                    if let Some(waker) = substream.read_waker.take() {
-                        waker.wake();
+                    if let Some(substream) = inner.substreams.get_mut(&id) {
+                        if let Some(waker) = substream.read_waker.take() {
+                            waker.wake();
+                        }
                     }
                 }
                 Event::Stream(StreamEvent::Writable { id }) => {
-                    let substream = inner.substreams.get_mut(&id).unwrap();
-                    if let Some(waker) = substream.write_waker.take() {
-                        waker.wake();
+                    if let Some(substream) = inner.substreams.get_mut(&id) {
+                        if let Some(waker) = substream.write_waker.take() {
+                            waker.wake();
+                        }
                     }
                 }
                 Event::Stream(StreamEvent::Finished { id }) => {
