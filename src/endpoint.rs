@@ -129,6 +129,7 @@ pub struct Endpoint {
 impl Endpoint {
     pub fn new(mut config: QuicConfig, addr: SocketAddr) -> Result<Self, QuicError> {
         config.transport.max_concurrent_uni_streams(0)?;
+        config.transport.datagram_receive_buffer_size(None);
         let transport = Arc::new(config.transport);
 
         let mut server_config = ServerConfig::<NoiseSession>::default();

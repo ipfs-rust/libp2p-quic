@@ -38,8 +38,8 @@ struct QuicMuxerInner {
     timer: Option<Timer>,
     /// State of all open substreams.
     substreams: FnvHashMap<StreamId, SubstreamState>,
-    /// Pending substream.
-    pending_substream: Option<OutboundSubstreamState>,
+    /// Pending substreams.
+    pending_substreams: Vec<Waker>,
     /// Close waker.
     close_waker: Option<Waker>,
     /// Connected.
@@ -53,17 +53,6 @@ struct SubstreamState {
     read_waker: Option<Waker>,
     /// Waker to wake if the substream becomes writable.
     write_waker: Option<Waker>,
-    /// Substream is readable.
-    readable: bool,
-    /// Substream is half closed.
-    half_closed: bool,
-}
-
-/// State of a substream being opened.
-#[derive(Debug)]
-enum OutboundSubstreamState {
-    Opened,
-    Pending(Waker),
 }
 
 impl QuicMuxer {
@@ -75,7 +64,7 @@ impl QuicMuxer {
                 waker: None,
                 timer: None,
                 substreams: Default::default(),
-                pending_substream: None,
+                pending_substreams: Default::default(),
                 close_waker: None,
                 connected: false,
             }),
@@ -133,7 +122,7 @@ impl StreamMuxer for QuicMuxer {
 
         loop {
             if let Some(timer) = inner.timer.as_mut() {
-                match  Pin::new(timer).poll(cx) {
+                match Pin::new(timer).poll(cx) {
                     Poll::Ready(expired) => {
                         inner.connection.handle_timeout(expired);
                         inner.timer = None;
@@ -157,8 +146,7 @@ impl StreamMuxer for QuicMuxer {
             } else {
                 inner.connection.poll_connection()
             }
-        }
-        {
+        } {
             match event {
                 Event::HandshakeDataReady => {}
                 Event::Connected => {
@@ -175,23 +163,18 @@ impl StreamMuxer for QuicMuxer {
                     return Poll::Ready(Err(QuicMuxerError::ConnectionLost { reason }));
                 }
                 Event::Stream(StreamEvent::Opened { dir: Dir::Bi }) => {
-                    let id = inner
-                        .connection
-                        .streams()
-                        .accept(Dir::Bi)
-                        .expect("received opened event");
-                    inner.substreams.insert(id, Default::default());
-                    return Poll::Ready(Ok(StreamMuxerEvent::InboundSubstream(id)));
+                    // handled at end.
                 }
                 Event::Stream(StreamEvent::Readable { id }) => {
+                    tracing::trace!("stream readable {}", id);
                     if let Some(substream) = inner.substreams.get_mut(&id) {
-                        substream.readable = true;
                         if let Some(waker) = substream.read_waker.take() {
                             waker.wake();
                         }
                     }
                 }
                 Event::Stream(StreamEvent::Writable { id }) => {
+                    tracing::trace!("stream writable {}", id);
                     if let Some(substream) = inner.substreams.get_mut(&id) {
                         if let Some(waker) = substream.write_waker.take() {
                             waker.wake();
@@ -199,8 +182,8 @@ impl StreamMuxer for QuicMuxer {
                     }
                 }
                 Event::Stream(StreamEvent::Finished { id }) => {
+                    tracing::trace!("stream finished {}", id);
                     if let Some(substream) = inner.substreams.get_mut(&id) {
-                        substream.half_closed = true;
                         if let Some(waker) = substream.read_waker.take() {
                             waker.wake();
                         }
@@ -215,10 +198,9 @@ impl StreamMuxer for QuicMuxer {
                     return Poll::Ready(Err(QuicMuxerError::StreamStopped { id, error_code }));
                 }
                 Event::Stream(StreamEvent::Available { dir: Dir::Bi }) => {
-                    if let Some(OutboundSubstreamState::Pending(waker)) =
-                        inner.pending_substream.take()
-                    {
-                        waker.wake();
+                    tracing::trace!("stream available");
+                    for pending in inner.pending_substreams.drain(..) {
+                        pending.wake();
                     }
                 }
                 Event::Stream(StreamEvent::Opened { dir: Dir::Uni })
@@ -236,6 +218,12 @@ impl StreamMuxer for QuicMuxer {
 
         // TODO quinn doesn't support `StreamMuxerEvent::AddressChange`.
 
+        if let Some(id) = inner.connection.streams().accept(Dir::Bi) {
+            inner.substreams.insert(id, Default::default());
+            tracing::trace!("opened incoming substream {}", id);
+            return Poll::Ready(Ok(StreamMuxerEvent::InboundSubstream(id)));
+        }
+
         if inner.substreams.is_empty() {
             if let Some(waker) = inner.close_waker.take() {
                 waker.wake();
@@ -246,12 +234,7 @@ impl StreamMuxer for QuicMuxer {
         Poll::Pending
     }
 
-    fn open_outbound(&self) -> Self::OutboundSubstream {
-        let mut inner = self.inner.lock();
-        // Only one substream at the time can be opened.
-        assert!(inner.pending_substream.is_none());
-        inner.pending_substream = Some(OutboundSubstreamState::Opened);
-    }
+    fn open_outbound(&self) -> Self::OutboundSubstream {}
 
     fn poll_outbound(
         &self,
@@ -259,22 +242,17 @@ impl StreamMuxer for QuicMuxer {
         _: &mut Self::OutboundSubstream,
     ) -> Poll<Result<Self::Substream, Self::Error>> {
         let mut inner = self.inner.lock();
-        // `open_outbound` was called before polling the substream.
-        assert!(inner.pending_substream.take().is_some());
-
         if let Some(id) = inner.connection.streams().open(Dir::Bi) {
+            tracing::trace!("opened outgoing substream {}", id);
             inner.substreams.insert(id, Default::default());
             Poll::Ready(Ok(id))
         } else {
-            inner.pending_substream = Some(OutboundSubstreamState::Pending(cx.waker().clone()));
+            inner.pending_substreams.push(cx.waker().clone());
             Poll::Pending
         }
     }
 
-    fn destroy_outbound(&self, _: Self::OutboundSubstream) {
-        let mut inner = self.inner.lock();
-        inner.pending_substream.take();
-    }
+    fn destroy_outbound(&self, _: Self::OutboundSubstream) {}
 
     fn read_substream(
         &self,
@@ -283,10 +261,6 @@ impl StreamMuxer for QuicMuxer {
         mut buf: &mut [u8],
     ) -> Poll<Result<usize, Self::Error>> {
         let mut inner = self.inner.lock();
-        let substream = inner.substreams.get(id).unwrap();
-        if substream.half_closed && !substream.readable {
-            return Poll::Ready(Ok(0));
-        }
         let mut stream = inner.connection.recv_stream(*id);
         let mut chunks = match stream.read(true) {
             Ok(chunks) => chunks,
@@ -299,7 +273,6 @@ impl StreamMuxer for QuicMuxer {
         };
         let mut bytes = 0;
         let mut pending = false;
-        let mut readable = true;
         loop {
             if buf.is_empty() {
                 break;
@@ -309,10 +282,7 @@ impl StreamMuxer for QuicMuxer {
                     buf.write_all(&chunk.bytes).expect("enough buffer space");
                     bytes += chunk.bytes.len();
                 }
-                Ok(None) => {
-                    readable = false;
-                    break
-                }
+                Ok(None) => break,
                 Err(ReadError::Reset(error_code)) => {
                     tracing::debug!("substream {} was reset with error code {}", id, error_code);
                     bytes = 0;
@@ -334,7 +304,6 @@ impl StreamMuxer for QuicMuxer {
             substream.read_waker = Some(cx.waker().clone());
             Poll::Pending
         } else {
-            substream.readable = readable;
             Poll::Ready(Ok(bytes))
         }
     }
@@ -365,6 +334,7 @@ impl StreamMuxer for QuicMuxer {
         _: &mut Context,
         id: &mut Self::Substream,
     ) -> Poll<Result<(), Self::Error>> {
+        tracing::trace!("closing substream {}", id);
         // closes the write end of the substream without waiting for the remote to receive the
         // event. use flush substream to wait for the remote to receive the event.
         let mut inner = self.inner.lock();
@@ -378,8 +348,21 @@ impl StreamMuxer for QuicMuxer {
     }
 
     fn destroy_substream(&self, id: Self::Substream) {
+        tracing::trace!("destroying substream {}", id);
         let mut inner = self.inner.lock();
         inner.substreams.remove(&id);
+        let mut stream = inner.connection.recv_stream(id);
+        let should_transmit = if let Ok(mut chunks) = stream.read(true) {
+            while let Ok(Some(_)) = chunks.next(usize::MAX) {}
+            chunks.finalize().should_transmit()
+        } else {
+            false
+        };
+        if should_transmit {
+            if let Some(waker) = inner.waker.take() {
+                waker.wake();
+            }
+        }
     }
 
     fn flush_substream(

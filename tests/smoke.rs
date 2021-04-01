@@ -16,7 +16,8 @@ use std::{io, iter};
 
 async fn create_swarm() -> Result<Swarm<RequestResponse<PingCodec>>> {
     let keypair = Keypair::generate_ed25519();
-    let transport = QuicConfig::new(&keypair)
+    let peer_id = keypair.public().into_peer_id();
+    let transport = QuicConfig::new(keypair)
         .listen_on("/ip4/127.0.0.1/udp/0/quic".parse()?)
         .await?
         .boxed();
@@ -24,7 +25,6 @@ async fn create_swarm() -> Result<Swarm<RequestResponse<PingCodec>>> {
     let protocols = iter::once((PingProtocol(), ProtocolSupport::Full));
     let cfg = RequestResponseConfig::default();
     let behaviour = RequestResponse::new(PingCodec(), protocols, cfg);
-    let peer_id = keypair.public().into_peer_id();
     tracing::info!("{}", peer_id);
     Ok(Swarm::new(transport, behaviour, peer_id))
 }
@@ -108,7 +108,10 @@ async fn smoke() -> Result<()> {
         e => panic!("{:?}", e),
     }
 
-    a.send_request(&Swarm::local_peer_id(&b), Ping(b"another substream".to_vec()));
+    a.send_request(
+        &Swarm::local_peer_id(&b),
+        Ping(b"another substream".to_vec()),
+    );
 
     assert!(a.next_event().now_or_never().is_none());
 
