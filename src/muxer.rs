@@ -53,6 +53,10 @@ struct SubstreamState {
     read_waker: Option<Waker>,
     /// Waker to wake if the substream becomes writable.
     write_waker: Option<Waker>,
+    /// Substream is readable.
+    readable: bool,
+    /// Substream is half closed.
+    half_closed: bool,
 }
 
 /// State of a substream being opened.
@@ -123,7 +127,7 @@ impl StreamMuxer for QuicMuxer {
             inner.connection.handle_event(event);
         }
 
-        while let Some(transmit) = inner.connection.poll_transmit(now) {
+        while let Some(transmit) = inner.connection.poll_transmit(now, 1) {
             inner.endpoint.send_transmit(transmit);
         }
 
@@ -182,6 +186,7 @@ impl StreamMuxer for QuicMuxer {
                 }
                 Event::Stream(StreamEvent::Readable { id }) => {
                     if let Some(substream) = inner.substreams.get_mut(&id) {
+                        substream.readable = true;
                         if let Some(waker) = substream.read_waker.take() {
                             waker.wake();
                         }
@@ -197,6 +202,7 @@ impl StreamMuxer for QuicMuxer {
                 Event::Stream(StreamEvent::Finished { id }) => {
                     tracing::info!("finished {}", id);
                     if let Some(substream) = inner.substreams.get_mut(&id) {
+                        substream.half_closed = true;
                         if let Some(waker) = substream.read_waker.take() {
                             waker.wake();
                         }
@@ -282,6 +288,10 @@ impl StreamMuxer for QuicMuxer {
         mut buf: &mut [u8],
     ) -> Poll<Result<usize, Self::Error>> {
         let mut inner = self.inner.lock();
+        let substream = inner.substreams.get(id).unwrap();
+        if substream.half_closed && !substream.readable {
+            return Poll::Ready(Ok(0));
+        }
         let mut stream = inner.connection.recv_stream(*id);
         let mut chunks = match stream.read(true) {
             Ok(chunks) => chunks,
@@ -295,6 +305,7 @@ impl StreamMuxer for QuicMuxer {
         };
         let mut bytes = 0;
         let mut pending = false;
+        let mut readable = true;
         loop {
             if buf.is_empty() {
                 tracing::info!("breaking early due to too small buffer {}", id);
@@ -305,7 +316,10 @@ impl StreamMuxer for QuicMuxer {
                     buf.write_all(&chunk.bytes).expect("enough buffer space");
                     bytes += chunk.bytes.len();
                 }
-                Ok(None) => break,
+                Ok(None) => {
+                    readable = false;
+                    break
+                }
                 Err(ReadError::Reset(error_code)) => {
                     tracing::debug!("substream {} was reset with error code {}", id, error_code);
                     bytes = 0;
@@ -322,12 +336,13 @@ impl StreamMuxer for QuicMuxer {
                 waker.wake();
             }
         }
-        if pending {
-            let substream = inner.substreams.get_mut(&id).unwrap();
+        let substream = inner.substreams.get_mut(&id).unwrap();
+        if pending && bytes == 0 {
             substream.read_waker = Some(cx.waker().clone());
             Poll::Pending
         } else {
             tracing::info!("read {} {}", id, bytes);
+            substream.readable = readable;
             Poll::Ready(Ok(bytes))
         }
     }
