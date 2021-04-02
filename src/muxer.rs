@@ -12,6 +12,7 @@ use quinn_proto::{
     ConnectionError, Dir, Event, FinishError, ReadError, ReadableError, StreamEvent, StreamId,
     VarInt, WriteError,
 };
+use std::collections::VecDeque;
 use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::pin::Pin;
@@ -39,7 +40,7 @@ struct QuicMuxerInner {
     /// State of all open substreams.
     substreams: FnvHashMap<StreamId, SubstreamState>,
     /// Pending substreams.
-    pending_substreams: Vec<Waker>,
+    pending_substreams: VecDeque<Waker>,
     /// Close waker.
     close_waker: Option<Waker>,
     /// Connected.
@@ -199,8 +200,8 @@ impl StreamMuxer for QuicMuxer {
                 }
                 Event::Stream(StreamEvent::Available { dir: Dir::Bi }) => {
                     tracing::trace!("stream available");
-                    for pending in inner.pending_substreams.drain(..) {
-                        pending.wake();
+                    if let Some(waker) = inner.pending_substreams.pop_front() {
+                        waker.wake();
                     }
                 }
                 Event::Stream(StreamEvent::Opened { dir: Dir::Uni })
@@ -245,9 +246,12 @@ impl StreamMuxer for QuicMuxer {
         if let Some(id) = inner.connection.streams().open(Dir::Bi) {
             tracing::trace!("opened outgoing substream {}", id);
             inner.substreams.insert(id, Default::default());
+            if let Some(waker) = inner.pending_substreams.pop_front() {
+                waker.wake();
+            }
             Poll::Ready(Ok(id))
         } else {
-            inner.pending_substreams.push(cx.waker().clone());
+            inner.pending_substreams.push_back(cx.waker().clone());
             Poll::Pending
         }
     }
