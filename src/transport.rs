@@ -1,4 +1,4 @@
-use crate::endpoint::{Endpoint, TransportChannel};
+use crate::endpoint::{EndpointConfig, TransportChannel};
 use crate::muxer::QuicMuxer;
 use crate::noise::NoiseUpgrade;
 use crate::{QuicConfig, QuicError};
@@ -36,7 +36,7 @@ impl QuicTransport {
         } else {
             Addresses::Ip(Some(socket_addr.ip()))
         };
-        let endpoint = Endpoint::new(config, socket_addr).map_err(TransportError::Other)?;
+        let endpoint = EndpointConfig::new(config, socket_addr).map_err(TransportError::Other)?;
         Ok(Self {
             inner: Arc::new(Mutex::new(QuicTransportInner {
                 channel: endpoint.spawn(),

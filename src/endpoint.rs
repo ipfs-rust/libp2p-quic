@@ -4,17 +4,19 @@ use crate::{QuicConfig, QuicError};
 use fnv::FnvHashMap;
 use futures::channel::{mpsc, oneshot};
 use futures::prelude::*;
-use quinn_proto::generic::{ClientConfig, EndpointConfig, ServerConfig};
+use quinn_proto::generic::{ClientConfig, ServerConfig};
 use quinn_proto::{
     ConnectionEvent, ConnectionHandle, DatagramEvent, EcnCodepoint, EndpointEvent, Transmit,
 };
+use std::collections::VecDeque;
 use std::io::IoSliceMut;
+use std::mem::MaybeUninit;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Instant;
-use udp_socket::{RecvMeta, UdpCapabilities, UdpSocket};
+use udp_socket::{RecvMeta, UdpCapabilities, UdpSocket, BATCH_SIZE};
 
 /// Message sent to the endpoint background task.
 #[derive(Debug)]
@@ -108,6 +110,8 @@ struct EndpointChannel {
     rx: mpsc::UnboundedReceiver<ToEndpoint>,
     tx: mpsc::UnboundedSender<Result<QuicMuxer, QuicError>>,
     port: u16,
+    max_datagrams: usize,
+    connection_tx: mpsc::UnboundedSender<ToEndpoint>,
 }
 
 impl EndpointChannel {
@@ -115,18 +119,30 @@ impl EndpointChannel {
         self.tx.unbounded_send(Ok(muxer)).ok();
     }
 
-    pub async fn next_event(&mut self) -> Option<ToEndpoint> {
-        self.rx.next().await
+    pub fn poll_next_event(&mut self, cx: &mut Context) -> Poll<Option<ToEndpoint>> {
+        Pin::new(&mut self.rx).poll_next(cx)
     }
 
-    pub fn port(&self) -> u16 {
-        self.port
+    pub fn create_connection(
+        &self,
+        id: ConnectionHandle,
+    ) -> (ConnectionChannel, mpsc::UnboundedSender<ConnectionEvent>) {
+        let (tx, rx) = mpsc::unbounded();
+        let channel = ConnectionChannel {
+            id,
+            tx: self.connection_tx.clone(),
+            rx,
+            port: self.port,
+            max_datagrams: self.max_datagrams,
+        };
+        (channel, tx)
     }
 }
 
+type QuinnEndpointConfig = quinn_proto::generic::EndpointConfig<NoiseSession>;
 type QuinnEndpoint = quinn_proto::generic::Endpoint<NoiseSession>;
 
-pub struct Endpoint {
+pub struct EndpointConfig {
     socket: UdpSocket,
     endpoint: QuinnEndpoint,
     port: u16,
@@ -134,7 +150,7 @@ pub struct Endpoint {
     capabilities: UdpCapabilities,
 }
 
-impl Endpoint {
+impl EndpointConfig {
     pub fn new(mut config: QuicConfig, addr: SocketAddr) -> Result<Self, QuicError> {
         config.transport.max_concurrent_uni_streams(0)?;
         config.transport.datagram_receive_buffer_size(None);
@@ -157,7 +173,7 @@ impl Endpoint {
             },
         };
 
-        let endpoint_config = EndpointConfig::default();
+        let endpoint_config = QuinnEndpointConfig::default();
 
         let socket = UdpSocket::bind(addr)?;
         let port = socket.local_addr()?.port();
@@ -187,145 +203,173 @@ impl Endpoint {
             tx: tx2,
             rx: rx1,
             port: self.port,
+            max_datagrams: self.capabilities.max_gso_segments,
+            connection_tx: transport.tx.clone(),
         };
-        let connection_tx = transport.tx.clone();
-        async_global_executor::spawn(background_task(
-            endpoint,
-            self.endpoint,
-            self.socket,
-            self.client_config,
-            connection_tx,
-            self.capabilities,
-        ))
-        .detach();
+        async_global_executor::spawn(Endpoint::new(endpoint, self)).detach();
         transport
     }
 }
 
-async fn background_task(
-    mut endpoint_channel: EndpointChannel,
-    mut endpoint: QuinnEndpoint,
+struct Endpoint {
+    channel: EndpointChannel,
+    endpoint: QuinnEndpoint,
     socket: UdpSocket,
     client_config: ClientConfig<NoiseSession>,
-    connection_tx: mpsc::UnboundedSender<ToEndpoint>,
-    capabilities: UdpCapabilities,
-) {
-    let mut connections = FnvHashMap::<ConnectionHandle, mpsc::UnboundedSender<_>>::default();
-    let mut recv_buffer = vec![0; 65536];
-    let buffers = &mut [IoSliceMut::new(&mut recv_buffer[..])][..];
-    let meta = &mut [RecvMeta::default()][..];
+    connections: FnvHashMap<ConnectionHandle, mpsc::UnboundedSender<ConnectionEvent>>,
+    outgoing: VecDeque<udp_socket::Transmit>,
+    recv_buf: Box<[u8]>,
+}
 
-    loop {
-        if let Some(transmit) = endpoint.poll_transmit() {
-            let ecn = transmit
-                .ecn
-                .map(|ecn| udp_socket::EcnCodepoint::from_bits(ecn as u8))
-                .unwrap_or_default();
-            let transmit = udp_socket::Transmit {
-                destination: transmit.destination,
-                contents: transmit.contents,
-                ecn,
-                segment_size: transmit.segment_size,
-                src_ip: transmit.src_ip,
-            };
-            match socket.send(&[transmit]).await {
-                Ok(1) => {}
-                Ok(_) => tracing::error!("send_to: partially transfered packet"),
-                Err(err) => tracing::error!("send_to: {}", err),
-            }
+impl Endpoint {
+    pub fn new(channel: EndpointChannel, config: EndpointConfig) -> Self {
+        let max_udp_payload_size = config
+            .endpoint
+            .config()
+            .get_max_udp_payload_size()
+            .min(u16::MAX as _) as usize;
+        let recv_buf = vec![0; max_udp_payload_size * BATCH_SIZE].into_boxed_slice();
+        Self {
+            channel,
+            endpoint: config.endpoint,
+            socket: config.socket,
+            client_config: config.client_config,
+            connections: Default::default(),
+            outgoing: Default::default(),
+            recv_buf,
+        }
+    }
+
+    pub fn transmit(&mut self, transmit: Transmit) {
+        let ecn = transmit
+            .ecn
+            .map(|ecn| udp_socket::EcnCodepoint::from_bits(ecn as u8))
+            .unwrap_or_default();
+        let transmit = udp_socket::Transmit {
+            destination: transmit.destination,
+            contents: transmit.contents,
+            ecn,
+            segment_size: transmit.segment_size,
+            src_ip: transmit.src_ip,
+        };
+        self.outgoing.push_back(transmit);
+    }
+}
+
+impl Future for Endpoint {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+        let me = Pin::into_inner(self);
+
+        while let Some(transmit) = me.endpoint.poll_transmit() {
+            me.transmit(transmit);
         }
 
-        futures::select! {
-            message = endpoint_channel.next_event().fuse() => {
-                match message {
-                    Some(ToEndpoint::Dial { addr, tx: dial_tx }) => {
-                        let (id, connection) =
-                            match endpoint.connect(client_config.clone(), addr, "server_name") {
-                                Ok(c) => c,
-                                Err(err) => {
-                                    tracing::error!("dial failure: {}", err);
-                                    let _ = dial_tx.send(Err(err.into()));
-                                    continue;
-                                }
-                            };
-                        let (tx, rx) = mpsc::unbounded();
-                        connections.insert(id, tx);
-                        let channel = ConnectionChannel {
-                            id,
-                            tx: connection_tx.clone(),
-                            rx,
-                            port: endpoint_channel.port(),
-                            max_datagrams: capabilities.max_gso_segments,
-                        };
-                        let muxer = QuicMuxer::new(channel, connection);
-                        let _ = dial_tx.send(Ok(muxer));
-                    }
-                    Some(ToEndpoint::ConnectionEvent { connection_id, event }) => {
-                        let is_drained_event = event.is_drained();
-                        if is_drained_event {
-                            connections.remove(&connection_id);
-                        }
-                        if let Some(event) = endpoint.handle_event(connection_id, event) {
-                            connections.get_mut(&connection_id).unwrap().unbounded_send(event).ok();
-                        }
-                    }
-                    Some(ToEndpoint::Transmit(transmit)) => {
-                        tracing::trace!(
-                            "transmit: dst: {} src: {:?} ecn: {:?} segment_size: {:?} len: {}",
-                            transmit.destination, transmit.src_ip, transmit.ecn,
-                            transmit.segment_size, transmit.contents.len());
-                        let ecn = transmit.ecn.map(|ecn| udp_socket::EcnCodepoint::from_bits(ecn as u8)).unwrap_or_default();
-                        let transmit = udp_socket::Transmit {
-                            destination: transmit.destination,
-                            contents: transmit.contents,
-                            ecn,
-                            segment_size: transmit.segment_size,
-                            src_ip: transmit.src_ip,
-                        };
-                        match socket.send(&[transmit]).await {
-                            Ok(1) => {}
-                            Ok(_) => tracing::error!("send_to: partially transfered packet"),
+        while let Poll::Ready(event) = me.channel.poll_next_event(cx) {
+            match event {
+                Some(ToEndpoint::Dial { addr, tx }) => {
+                    let client_config = me.client_config.clone();
+                    let (id, connection) =
+                        match me.endpoint.connect(client_config, addr, "server_name") {
+                            Ok(c) => c,
                             Err(err) => {
-                                tracing::error!("send_to: {}", err);
+                                tracing::error!("dial failure: {}", err);
+                                let _ = tx.send(Err(err.into()));
+                                continue;
                             }
-                        }
+                        };
+                    let (channel, conn) = me.channel.create_connection(id);
+                    me.connections.insert(id, conn);
+                    let muxer = QuicMuxer::new(channel, connection);
+                    tx.send(Ok(muxer)).ok();
+                }
+                Some(ToEndpoint::ConnectionEvent {
+                    connection_id,
+                    event,
+                }) => {
+                    let is_drained_event = event.is_drained();
+                    if is_drained_event {
+                        me.connections.remove(&connection_id);
                     }
-                    None => return,
+                    if let Some(event) = me.endpoint.handle_event(connection_id, event) {
+                        me.connections
+                            .get_mut(&connection_id)
+                            .unwrap()
+                            .unbounded_send(event)
+                            .ok();
+                    }
+                }
+                Some(ToEndpoint::Transmit(transmit)) => {
+                    me.transmit(transmit);
+                }
+                None => {
+                    me.endpoint.reject_new_connections();
+                    return Poll::Ready(());
                 }
             }
-            result = socket.recv(buffers, meta).fuse() => {
-                let n = match result {
-                    Ok(n) => n,
-                    Err(err) => {
-                        tracing::error!("recv_from: {}", err);
-                        continue;
-                    },
-                };
-                for i in 0..n {
-                    let meta = &meta[i];
-                    let packet = From::from(&buffers[i][..meta.len]);
-                    let ecn = meta.ecn.map(|ecn| EcnCodepoint::from_bits(ecn as u8)).unwrap_or_default();
-                    match endpoint.handle(Instant::now(), meta.source, meta.dst_ip, ecn, packet) {
-                        None => {},
-                        Some((id, DatagramEvent::ConnectionEvent(event))) => {
-                            connections.get_mut(&id).unwrap().unbounded_send(event).ok();
-                        },
-                        Some((id, DatagramEvent::NewConnection(connection))) => {
-                            let (tx, rx) = mpsc::unbounded();
-                            connections.insert(id, tx);
-                            let channel = ConnectionChannel {
-                                id,
-                                tx: connection_tx.clone(),
-                                rx,
-                                port: endpoint_channel.port(),
-                                max_datagrams: capabilities.max_gso_segments,
-                            };
-                            let muxer = QuicMuxer::new(channel, connection);
-                            let _ = endpoint_channel.send_incoming(muxer);
-                        }
+        }
+
+        while !me.outgoing.is_empty() {
+            me.outgoing.make_contiguous();
+            match me.socket.poll_send(cx, me.outgoing.as_slices().0) {
+                Poll::Ready(Ok(n)) => {
+                    me.outgoing.drain(..n);
+                }
+                Poll::Ready(Err(err)) => tracing::error!("send_to: {}", err),
+                Poll::Pending => break,
+            }
+        }
+
+        let mut metas = [RecvMeta::default(); BATCH_SIZE];
+        let mut iovs = MaybeUninit::<[IoSliceMut; BATCH_SIZE]>::uninit();
+        me.recv_buf
+            .chunks_mut(me.recv_buf.len() / BATCH_SIZE)
+            .enumerate()
+            .for_each(|(i, buf)| unsafe {
+                iovs.as_mut_ptr()
+                    .cast::<IoSliceMut>()
+                    .add(i)
+                    .write(IoSliceMut::new(buf));
+            });
+        let mut iovs = unsafe { iovs.assume_init() };
+        while let Poll::Ready(result) = me.socket.poll_recv(cx, &mut iovs, &mut metas) {
+            let n = match result {
+                Ok(n) => n,
+                Err(err) => {
+                    tracing::error!("recv_from: {}", err);
+                    continue;
+                }
+            };
+            for i in 0..n {
+                let meta = &metas[i];
+                let packet = From::from(&iovs[i][..meta.len]);
+                let ecn = meta
+                    .ecn
+                    .map(|ecn| EcnCodepoint::from_bits(ecn as u8))
+                    .unwrap_or_default();
+                match me
+                    .endpoint
+                    .handle(Instant::now(), meta.source, meta.dst_ip, ecn, packet)
+                {
+                    None => {}
+                    Some((id, DatagramEvent::ConnectionEvent(event))) => {
+                        me.connections
+                            .get_mut(&id)
+                            .unwrap()
+                            .unbounded_send(event)
+                            .ok();
+                    }
+                    Some((id, DatagramEvent::NewConnection(connection))) => {
+                        let (channel, tx) = me.channel.create_connection(id);
+                        me.connections.insert(id, tx);
+                        let muxer = QuicMuxer::new(channel, connection);
+                        let _ = me.channel.send_incoming(muxer);
                     }
                 }
             }
         }
+
+        Poll::Pending
     }
 }
