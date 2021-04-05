@@ -43,8 +43,6 @@ struct QuicMuxerInner {
     pending_substreams: VecDeque<Waker>,
     /// Close waker.
     close_waker: Option<Waker>,
-    /// Connected.
-    connected: bool,
 }
 
 /// State of a single substream.
@@ -67,7 +65,6 @@ impl QuicMuxer {
                 substreams: Default::default(),
                 pending_substreams: Default::default(),
                 close_waker: None,
-                connected: false,
             }),
         }
     }
@@ -117,7 +114,8 @@ impl StreamMuxer for QuicMuxer {
             inner.connection.handle_event(event);
         }
 
-        while let Some(transmit) = inner.connection.poll_transmit(now, 1) {
+        let max_datagrams = inner.endpoint.max_datagrams();
+        while let Some(transmit) = inner.connection.poll_transmit(now, max_datagrams) {
             inner.endpoint.send_transmit(transmit);
         }
 
@@ -141,17 +139,10 @@ impl StreamMuxer for QuicMuxer {
             inner.endpoint.send_endpoint_event(event);
         }
 
-        while let Some(event) = {
-            if inner.connected {
-                inner.connection.poll()
-            } else {
-                inner.connection.poll_connection()
-            }
-        } {
+        while let Some(event) = inner.connection.poll() {
             match event {
                 Event::HandshakeDataReady => {}
                 Event::Connected => {
-                    inner.connected = true;
                     // Break here so that the noise upgrade can finish.
                     return Poll::Pending;
                 }

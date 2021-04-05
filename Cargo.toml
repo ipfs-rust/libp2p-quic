@@ -17,11 +17,12 @@ futures = "0.3.13"
 if-watch = "0.2.0"
 libp2p = { version = "0.36.0", default-features = false }
 parking_lot = "0.11.1"
-quinn-proto = { version = "0.7.1", default-features = false, features = ["ring"] }
+quinn-proto = { git = "https://github.com/quinn-rs/quinn", branch = "main", default-features = false, features = ["ring"] }
 ring = "0.16.20"
 snow = "0.7.2"
 thiserror = "1.0.24"
 tracing = "0.1.25"
+udp-socket = "0.1.1"
 
 [dev-dependencies]
 async-std = { version = "1.9.0", features = ["attributes"] }
@@ -30,6 +31,3 @@ libp2p = { version = "0.36.0", default-features = false, features = ["request-re
 log-panics = "2.0.0"
 rand = "0.8.3"
 tracing-subscriber = "0.2.17"
-
-[patch.crates-io]
-quinn-proto = { git = "https://github.com/dvc94ch/quinn", branch = "poll-order" }

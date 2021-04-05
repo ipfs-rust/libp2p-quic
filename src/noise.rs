@@ -219,12 +219,12 @@ impl Session for NoiseSession {
         }
     }
 
-    fn next_1rtt_keys(&mut self) -> KeyPair<Self::PacketKey> {
+    fn next_1rtt_keys(&mut self) -> Option<KeyPair<Self::PacketKey>> {
         // TODO!!!
-        KeyPair {
+        Some(KeyPair {
             local: NoisePacketKey::NextKey,
             remote: NoisePacketKey::NextKey,
-        }
+        })
     }
 
     fn read_handshake(&mut self, handshake: &[u8]) -> Result<bool, TransportError> {
