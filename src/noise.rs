@@ -257,12 +257,6 @@ impl Session for NoiseSession {
                 Ok(false)
             }
             (Side::Client, State::ServerInit) => {
-                self.remote_transport_parameters =
-                    Some(TransportParameters::read(Side::Client, &mut cursor)?);
-                state.state = State::HandshakeKeysReady;
-                Ok(false)
-            }
-            (Side::Client, State::ServerHandshake) => {
                 let remote_static = state.noise.get_remote_static().unwrap();
                 let remote_public =
                     Identity::read(&mut cursor, remote_static).map_err(|err| TransportError {
@@ -271,6 +265,12 @@ impl Session for NoiseSession {
                         reason: err.to_string(),
                     })?;
                 self.remote_public_key = Some(remote_public);
+                self.remote_transport_parameters =
+                    Some(TransportParameters::read(Side::Client, &mut cursor)?);
+                state.state = State::HandshakeKeysReady;
+                Ok(false)
+            }
+            (Side::Client, State::ServerHandshake) => {
                 state.state = State::ClientHandshake;
                 Ok(true)
             }
@@ -309,6 +309,7 @@ impl Session for NoiseSession {
                 return None;
             }
             (Side::Server, State::ServerInit) => {
+                state.identity.write(&mut payload);
                 state.transport_parameters.write(&mut payload);
                 state.state = State::ServerHandshake;
             }
@@ -322,7 +323,7 @@ impl Session for NoiseSession {
                 return None;
             }
             (Side::Server, State::ServerHandshake) => {
-                state.identity.write(&mut payload);
+                payload.extend_from_slice(&[0]);
                 state.state = State::ClientHandshake;
             }
             (Side::Client, State::ClientHandshake) => {
@@ -344,15 +345,14 @@ impl Session for NoiseSession {
             }
         }
         if state.state == State::ServerHandshake {
-            let hash = state.noise.get_handshake_hash().to_vec();
             Some(Keys {
                 header: KeyPair {
                     local: PlaintextHeaderKey,
                     remote: PlaintextHeaderKey,
                 },
                 packet: KeyPair {
-                    local: NoisePacketKey::Handshake(hash.clone()),
-                    remote: NoisePacketKey::Handshake(hash),
+                    local: NoisePacketKey::Initial,
+                    remote: NoisePacketKey::Initial,
                 },
             })
         } else if state.state == State::HandshakeComplete {
@@ -466,8 +466,6 @@ const RETRY_INTEGRITY_NONCE: [u8; 12] = [
 pub enum NoisePacketKey {
     /// Initial key for first packet. We send the first packet in plain text.
     Initial,
-    /// Handshake key used during the handshake.
-    Handshake(Vec<u8>),
     /// After the handshake is complete the noise state is used to encrypt packets.
     Transport(Arc<snow::StatelessTransportState>),
     /// When the key is exhausted due to integrity or confidentiality limits, the key
@@ -479,16 +477,14 @@ impl PacketKey for NoisePacketKey {
     fn encrypt(&self, packet: u64, buf: &mut [u8], header_len: usize) {
         match self {
             Self::Initial => {}
-            Self::Handshake(_hash) => {
-                // TODO: encrypt with handshake hash
-            }
             Self::Transport(state) => {
-                // TODO: provide the header as assiciated data
                 // TODO: mutate the buffer in place
-                let (_header, payload) = buf.split_at_mut(header_len);
+                let (header, payload) = buf.split_at_mut(header_len);
                 let mut buffer = vec![0; payload.len()];
                 let (content, _tag) = payload.split_at_mut(payload.len() - self.tag_len());
-                state.write_message(packet, content, &mut buffer).unwrap();
+                state
+                    .write_message(packet, content, &mut buffer, header)
+                    .unwrap();
                 payload.copy_from_slice(&buffer);
             }
             Self::NextKey => panic!("key rotation is not implemented"),
@@ -498,23 +494,19 @@ impl PacketKey for NoisePacketKey {
     fn decrypt(
         &self,
         packet: u64,
-        _header: &[u8],
+        header: &[u8],
         payload: &mut BytesMut,
     ) -> Result<(), CryptoError> {
         match self {
             Self::Initial => {}
-            Self::Handshake(_hash) => {
-                // TODO: decrypt with handshake hash
-            }
             Self::Transport(state) => {
-                // TODO: provide the header as assiciated data
                 // TODO: mutate the buffer in place
                 if payload.len() < self.tag_len() {
                     return Err(CryptoError);
                 }
                 let mut buffer = vec![0; payload.len() - self.tag_len()];
                 state
-                    .read_message(packet, payload, &mut buffer)
+                    .read_message(packet, payload, &mut buffer, header)
                     .map_err(|_| CryptoError)?;
                 payload.truncate(buffer.len());
                 payload.copy_from_slice(&buffer);
