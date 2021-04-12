@@ -50,8 +50,10 @@ async fn smoke() -> Result<()> {
     let mut data = vec![0; 4096 * 10];
     rng.fill_bytes(&mut data);
 
-    b.add_address(&Swarm::local_peer_id(&a), addr);
-    b.send_request(&Swarm::local_peer_id(&a), Ping(data.clone()));
+    b.behaviour_mut()
+        .add_address(&Swarm::local_peer_id(&a), addr);
+    b.behaviour_mut()
+        .send_request(&Swarm::local_peer_id(&a), Ping(data.clone()));
 
     match b.next_event().await {
         SwarmEvent::Dialing(_) => {}
@@ -85,7 +87,9 @@ async fn smoke() -> Result<()> {
                 },
             ..
         }) => {
-            a.send_response(channel, Pong(ping)).unwrap();
+            a.behaviour_mut()
+                .send_response(channel, Pong(ping))
+                .unwrap();
         }
         e => panic!("{:?}", e),
     }
@@ -107,7 +111,7 @@ async fn smoke() -> Result<()> {
         e => panic!("{:?}", e),
     }
 
-    a.send_request(
+    a.behaviour_mut().send_request(
         &Swarm::local_peer_id(&b),
         Ping(b"another substream".to_vec()),
     );
@@ -124,7 +128,9 @@ async fn smoke() -> Result<()> {
                 },
             ..
         }) => {
-            b.send_response(channel, Pong(data)).unwrap();
+            b.behaviour_mut()
+                .send_response(channel, Pong(data))
+                .unwrap();
         }
         e => panic!("{:?}", e),
     }

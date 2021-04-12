@@ -55,10 +55,12 @@ async fn main() -> Result<()> {
     let mut data = vec![0; 4096 * 10];
     rng.fill_bytes(&mut data);
 
-    b.add_address(&Swarm::local_peer_id(&a), addr);
+    b.behaviour_mut()
+        .add_address(&Swarm::local_peer_id(&a), addr);
 
     for _ in 0..1024 {
-        b.send_request(&Swarm::local_peer_id(&a), Ping(data.clone()));
+        b.behaviour_mut()
+            .send_request(&Swarm::local_peer_id(&a), Ping(data.clone()));
     }
 
     let mut res = 0;
@@ -73,7 +75,7 @@ async fn main() -> Result<()> {
                     },
                     ..
                 }) => {
-                    a.send_response(channel, Pong(ping)).unwrap();
+                    a.behaviour_mut().send_response(channel, Pong(ping)).unwrap();
                 }
                 _ => {}
             },
