@@ -4,7 +4,7 @@ mod noise;
 mod transport;
 
 pub use crate::muxer::{QuicMuxer, QuicMuxerError};
-pub use crate::noise::ToPeerId;
+pub use crate::noise::ToLibp2p;
 pub use crate::transport::{QuicDial, QuicTransport};
 pub use ed25519_dalek::Keypair;
 pub use quinn_proto::{ConfigError, ConnectError, ConnectionError, TransportConfig};

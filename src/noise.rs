@@ -2,7 +2,6 @@ use crate::{QuicError, QuicMuxer};
 use bytes::{Buf, BufMut, BytesMut};
 use ed25519_dalek::Signer;
 use libp2p::core::StreamMuxer;
-use libp2p::identity::PublicKey;
 use libp2p::PeerId;
 use quinn_proto::crypto::{
     ClientConfig, CryptoError, ExportKeyingMaterialError, HeaderKey, KeyPair, Keys, PacketKey,
@@ -48,20 +47,26 @@ impl Future for NoiseUpgrade {
 
 pub type IdentityKeypair = ed25519_dalek::Keypair;
 
-pub trait ToPeerId {
-    fn to_peer_id(&self) -> PeerId;
-}
-
-impl ToPeerId for ed25519_dalek::PublicKey {
+pub trait ToLibp2p {
+    fn to_keypair(&self) -> libp2p::identity::Keypair;
+    fn to_public(&self) -> libp2p::identity::PublicKey;
     fn to_peer_id(&self) -> PeerId {
-        dalek_to_libp2p(self).into_peer_id()
+        self.to_public().into_peer_id()
     }
 }
 
-fn dalek_to_libp2p(public: &ed25519_dalek::PublicKey) -> PublicKey {
-    PublicKey::Ed25519(
-        libp2p::identity::ed25519::PublicKey::decode(&public.to_bytes()[..]).unwrap(),
-    )
+impl ToLibp2p for ed25519_dalek::Keypair {
+    fn to_keypair(&self) -> libp2p::identity::Keypair {
+        let mut secret_key = self.secret.to_bytes();
+        let secret_key = libp2p::identity::ed25519::SecretKey::from_bytes(&mut secret_key).unwrap();
+        libp2p::identity::Keypair::Ed25519(secret_key.into())
+    }
+
+    fn to_public(&self) -> libp2p::identity::PublicKey {
+        let public_key = self.public.to_bytes();
+        let public_key = libp2p::identity::ed25519::PublicKey::decode(&public_key[..]).unwrap();
+        libp2p::identity::PublicKey::Ed25519(public_key.into())
+    }
 }
 
 pub struct NoiseConfig {
@@ -132,7 +137,7 @@ impl NoiseConfig {
                 noise,
                 transport_parameters: *params,
                 identity: Identity {
-                    public_key: dalek_to_libp2p(&self.keypair.public).into_protobuf_encoding(),
+                    public_key: self.keypair.to_public().into_protobuf_encoding(),
                     signed_x25519_key,
                 },
             }),

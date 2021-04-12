@@ -9,13 +9,13 @@ use libp2p::request_response::{
 };
 use libp2p::swarm::{Swarm, SwarmBuilder, SwarmEvent};
 use libp2p::Multiaddr;
-use libp2p_quic::{Keypair, QuicConfig, ToPeerId};
+use libp2p_quic::{Keypair, QuicConfig, ToLibp2p};
 use rand::RngCore;
 use std::{io, iter};
 
 async fn create_swarm() -> Result<Swarm<RequestResponse<PingCodec>>> {
     let keypair = Keypair::generate();
-    let peer_id = keypair.public.to_peer_id();
+    let peer_id = keypair.to_peer_id();
     let transport = QuicConfig::new(keypair)
         .listen_on("/ip4/127.0.0.1/udp/0/quic".parse()?)
         .await?
