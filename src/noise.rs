@@ -1,6 +1,8 @@
 use crate::{QuicError, QuicMuxer};
 use bytes::{Buf, BufMut, BytesMut};
+use ed25519_dalek::Signer;
 use libp2p::core::StreamMuxer;
+use libp2p::identity::PublicKey;
 use libp2p::PeerId;
 use quinn_proto::crypto::{
     ClientConfig, CryptoError, ExportKeyingMaterialError, HeaderKey, KeyPair, Keys, PacketKey,
@@ -44,9 +46,24 @@ impl Future for NoiseUpgrade {
     }
 }
 
-pub type IdentityKeypair = libp2p::core::identity::Keypair;
+pub type IdentityKeypair = ed25519_dalek::Keypair;
 
-#[derive(Clone)]
+pub trait ToPeerId {
+    fn to_peer_id(&self) -> PeerId;
+}
+
+impl ToPeerId for ed25519_dalek::PublicKey {
+    fn to_peer_id(&self) -> PeerId {
+        dalek_to_libp2p(self).into_peer_id()
+    }
+}
+
+fn dalek_to_libp2p(public: &ed25519_dalek::PublicKey) -> PublicKey {
+    PublicKey::Ed25519(
+        libp2p::identity::ed25519::PublicKey::decode(&public.to_bytes()[..]).unwrap(),
+    )
+}
+
 pub struct NoiseConfig {
     pub(crate) params: snow::params::NoiseParams,
     pub(crate) keypair: IdentityKeypair,
@@ -57,25 +74,25 @@ impl std::fmt::Debug for NoiseConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         f.debug_struct("NoiseConfig")
             .field("params", &self.params)
-            .field("keypair", &self.keypair.public().into_peer_id().to_string())
+            .field("keypair", &self.keypair.public)
             .field("prologue", &self.prologue)
             .finish()
     }
 }
 
-impl NoiseConfig {
+impl Default for NoiseConfig {
     fn default() -> Self {
         Self {
             params: "Noise_XX_25519_AESGCM_SHA256".parse().unwrap(),
-            keypair: IdentityKeypair::generate_ed25519(),
+            keypair: IdentityKeypair::generate(),
             prologue: Default::default(),
         }
     }
 }
 
-impl ClientConfig<NoiseSession> for NoiseConfig {
+impl ClientConfig<NoiseSession> for Arc<NoiseConfig> {
     fn new() -> Self {
-        Self::default()
+        Default::default()
     }
 
     fn start_session(
@@ -83,17 +100,17 @@ impl ClientConfig<NoiseSession> for NoiseConfig {
         _: &str,
         params: &TransportParameters,
     ) -> Result<NoiseSession, ConnectError> {
-        Ok(self.start_session(Side::Client, params))
+        Ok(NoiseConfig::start_session(self, Side::Client, params))
     }
 }
 
-impl ServerConfig<NoiseSession> for NoiseConfig {
+impl ServerConfig<NoiseSession> for Arc<NoiseConfig> {
     fn new() -> Self {
-        Self::default()
+        Default::default()
     }
 
     fn start_session(&self, params: &TransportParameters) -> NoiseSession {
-        self.start_session(Side::Server, params)
+        NoiseConfig::start_session(self, Side::Server, params)
     }
 }
 
@@ -102,7 +119,7 @@ impl NoiseConfig {
         let builder = snow::Builder::new(self.params.clone()).prologue(&self.prologue);
         let x25519 = builder.generate_keypair().unwrap();
         let builder = builder.local_private_key(&x25519.private);
-        let signed_x25519_key = self.keypair.sign(&x25519.public).unwrap();
+        let signed_x25519_key = self.keypair.sign(&x25519.public).to_bytes().to_vec();
         let noise = if side == Side::Client {
             builder.build_initiator().unwrap()
         } else {
@@ -115,7 +132,7 @@ impl NoiseConfig {
                 noise,
                 transport_parameters: *params,
                 identity: Identity {
-                    public_key: self.keypair.public().into_protobuf_encoding(),
+                    public_key: dalek_to_libp2p(&self.keypair.public).into_protobuf_encoding(),
                     signed_x25519_key,
                 },
             }),
@@ -199,8 +216,8 @@ pub struct NoiseSession {
 impl Session for NoiseSession {
     type HandshakeData = libp2p::core::identity::PublicKey;
     type Identity = PeerId;
-    type ClientConfig = NoiseConfig;
-    type ServerConfig = NoiseConfig;
+    type ClientConfig = Arc<NoiseConfig>;
+    type ServerConfig = Arc<NoiseConfig>;
     type HmacKey = ring::hmac::Key;
     type HandshakeTokenKey = ring::hkdf::Prk;
     type HeaderKey = PlaintextHeaderKey;

@@ -156,21 +156,19 @@ impl EndpointConfig {
         config.transport.datagram_receive_buffer_size(None);
         let transport = Arc::new(config.transport);
 
+        let noise_config = Arc::new(NoiseConfig {
+            params: config.noise,
+            keypair: config.keypair,
+            prologue: config.prologue,
+        });
+
         let mut server_config = ServerConfig::<NoiseSession>::default();
         server_config.transport = transport.clone();
-        server_config.crypto = NoiseConfig {
-            params: config.noise.clone(),
-            keypair: config.keypair.clone(),
-            prologue: config.prologue.clone(),
-        };
+        server_config.crypto = noise_config.clone();
 
         let client_config = ClientConfig::<NoiseSession> {
             transport,
-            crypto: NoiseConfig {
-                params: config.noise,
-                keypair: config.keypair,
-                prologue: config.prologue,
-            },
+            crypto: noise_config,
         };
 
         let endpoint_config = QuinnEndpointConfig::default();

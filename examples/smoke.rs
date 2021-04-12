@@ -2,7 +2,6 @@ use anyhow::Result;
 use async_trait::async_trait;
 use futures::future::FutureExt;
 use futures::io::{AsyncRead, AsyncWrite};
-use libp2p::core::identity::Keypair;
 use libp2p::core::upgrade::{read_one, write_one};
 use libp2p::request_response::{
     ProtocolName, ProtocolSupport, RequestResponse, RequestResponseCodec, RequestResponseConfig,
@@ -10,13 +9,13 @@ use libp2p::request_response::{
 };
 use libp2p::swarm::{Swarm, SwarmBuilder, SwarmEvent};
 use libp2p::Multiaddr;
-use libp2p_quic::QuicConfig;
+use libp2p_quic::{Keypair, QuicConfig, ToPeerId};
 use rand::RngCore;
 use std::{io, iter};
 
 async fn create_swarm() -> Result<Swarm<RequestResponse<PingCodec>>> {
-    let keypair = Keypair::generate_ed25519();
-    let peer_id = keypair.public().into_peer_id();
+    let keypair = Keypair::generate();
+    let peer_id = keypair.public.to_peer_id();
     let transport = QuicConfig::new(keypair)
         .listen_on("/ip4/127.0.0.1/udp/0/quic".parse()?)
         .await?
