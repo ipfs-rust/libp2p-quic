@@ -77,7 +77,8 @@ impl Transport for QuicTransport {
     type ListenerUpgrade = NoiseUpgrade;
     type Dial = QuicDial;
 
-    fn listen_on(self, _: Multiaddr) -> Result<Self::Listener, TransportError<Self::Error>> {
+    fn listen_on(self, addr: Multiaddr) -> Result<Self::Listener, TransportError<Self::Error>> {
+        multiaddr_to_socketaddr(&addr).map_err(|_| TransportError::MultiaddrNotSupported(addr))?;
         Ok(self)
     }
 

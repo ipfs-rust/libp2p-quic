@@ -8,7 +8,6 @@ use libp2p::request_response::{
     RequestResponseEvent, RequestResponseMessage,
 };
 use libp2p::swarm::{Swarm, SwarmEvent};
-use libp2p::Multiaddr;
 use libp2p_quic::{Keypair, QuicConfig, ToLibp2p};
 use rand::RngCore;
 use std::{io, iter};
@@ -40,7 +39,7 @@ async fn smoke() -> Result<()> {
     let mut a = create_swarm().await?;
     let mut b = create_swarm().await?;
 
-    Swarm::listen_on(&mut a, Multiaddr::empty())?;
+    Swarm::listen_on(&mut a, "/ip4/127.0.0.1/udp/0/quic".parse()?)?;
 
     let addr = match a.next_event().await {
         SwarmEvent::NewListenAddr(addr) => addr,
