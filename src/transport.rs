@@ -14,6 +14,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use udp_socket::SocketType;
 
 #[derive(Clone)]
 pub struct QuicTransport {
@@ -112,14 +113,26 @@ impl Stream for QuicTransport {
             }
             Addresses::Unspecified(watcher) => match Pin::new(watcher).poll(cx) {
                 Poll::Ready(Ok(IfEvent::Up(net))) => {
-                    let addr =
-                        socketaddr_to_multiaddr(&SocketAddr::new(net.addr(), inner.channel.port()));
-                    return Poll::Ready(Some(Ok(ListenerEvent::NewAddress(addr))));
+                    if inner.channel.ty() == SocketType::Ipv4 && net.addr().is_ipv4()
+                        || inner.channel.ty() != SocketType::Ipv4 && net.addr().is_ipv6()
+                    {
+                        let addr = socketaddr_to_multiaddr(&SocketAddr::new(
+                            net.addr(),
+                            inner.channel.port(),
+                        ));
+                        return Poll::Ready(Some(Ok(ListenerEvent::NewAddress(addr))));
+                    }
                 }
                 Poll::Ready(Ok(IfEvent::Down(net))) => {
-                    let addr =
-                        socketaddr_to_multiaddr(&SocketAddr::new(net.addr(), inner.channel.port()));
-                    return Poll::Ready(Some(Ok(ListenerEvent::AddressExpired(addr))));
+                    if inner.channel.ty() == SocketType::Ipv4 && net.addr().is_ipv4()
+                        || inner.channel.ty() != SocketType::Ipv4 && net.addr().is_ipv6()
+                    {
+                        let addr = socketaddr_to_multiaddr(&SocketAddr::new(
+                            net.addr(),
+                            inner.channel.port(),
+                        ));
+                        return Poll::Ready(Some(Ok(ListenerEvent::AddressExpired(addr))));
+                    }
                 }
                 Poll::Ready(Err(err)) => return Poll::Ready(Some(Err(err.into()))),
                 Poll::Pending => {}

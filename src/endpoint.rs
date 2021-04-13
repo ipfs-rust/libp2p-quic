@@ -16,7 +16,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Instant;
-use udp_socket::{RecvMeta, UdpCapabilities, UdpSocket, BATCH_SIZE};
+use udp_socket::{RecvMeta, SocketType, UdpCapabilities, UdpSocket, BATCH_SIZE};
 
 /// Message sent to the endpoint background task.
 #[derive(Debug)]
@@ -43,6 +43,7 @@ pub struct TransportChannel {
     tx: mpsc::UnboundedSender<ToEndpoint>,
     rx: mpsc::UnboundedReceiver<Result<QuicMuxer, QuicError>>,
     port: u16,
+    ty: SocketType,
 }
 
 impl TransportChannel {
@@ -62,6 +63,10 @@ impl TransportChannel {
 
     pub fn port(&self) -> u16 {
         self.port
+    }
+
+    pub fn ty(&self) -> SocketType {
+        self.ty
     }
 }
 
@@ -196,6 +201,7 @@ impl EndpointConfig {
             tx: tx1,
             rx: rx2,
             port: self.port,
+            ty: self.socket.socket_type(),
         };
         let endpoint = EndpointChannel {
             tx: tx2,
