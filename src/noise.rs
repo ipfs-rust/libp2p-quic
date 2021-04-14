@@ -89,7 +89,7 @@ impl Default for NoiseConfig {
     fn default() -> Self {
         Self {
             params: "Noise_XX_25519_AESGCM_SHA256".parse().unwrap(),
-            keypair: IdentityKeypair::generate(),
+            keypair: IdentityKeypair::generate(&mut rand_core::OsRng {}),
             prologue: Default::default(),
         }
     }
@@ -501,11 +501,12 @@ impl PacketKey for NoisePacketKey {
             Self::Initial => {}
             Self::Transport(state) => {
                 // TODO: mutate the buffer in place
-                let (header, payload) = buf.split_at_mut(header_len);
+                // TODO: protect header
+                let (_header, payload) = buf.split_at_mut(header_len);
                 let mut buffer = vec![0; payload.len()];
                 let (content, _tag) = payload.split_at_mut(payload.len() - self.tag_len());
                 state
-                    .write_message(packet, content, &mut buffer, header)
+                    .write_message(packet, content, &mut buffer)
                     .unwrap();
                 payload.copy_from_slice(&buffer);
             }
@@ -516,19 +517,20 @@ impl PacketKey for NoisePacketKey {
     fn decrypt(
         &self,
         packet: u64,
-        header: &[u8],
+        _header: &[u8],
         payload: &mut BytesMut,
     ) -> Result<(), CryptoError> {
         match self {
             Self::Initial => {}
             Self::Transport(state) => {
                 // TODO: mutate the buffer in place
+                // TODO: protect header
                 if payload.len() < self.tag_len() {
                     return Err(CryptoError);
                 }
                 let mut buffer = vec![0; payload.len() - self.tag_len()];
                 state
-                    .read_message(packet, payload, &mut buffer, header)
+                    .read_message(packet, payload, &mut buffer)
                     .map_err(|_| CryptoError)?;
                 payload.truncate(buffer.len());
                 payload.copy_from_slice(&buffer);

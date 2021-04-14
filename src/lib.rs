@@ -25,7 +25,7 @@ pub struct QuicConfig {
 impl Default for QuicConfig {
     fn default() -> Self {
         Self {
-            keypair: Keypair::generate(),
+            keypair: Keypair::generate(&mut rand_core::OsRng {}),
             noise: "Noise_XX_25519_AESGCM_SHA256".parse().unwrap(),
             prologue: vec![],
             transport: TransportConfig::default(),

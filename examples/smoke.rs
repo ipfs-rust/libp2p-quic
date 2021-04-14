@@ -13,7 +13,7 @@ use rand::RngCore;
 use std::{io, iter};
 
 async fn create_swarm() -> Result<Swarm<RequestResponse<PingCodec>>> {
-    let keypair = Keypair::generate();
+    let keypair = Keypair::generate(&mut rand_core::OsRng {});
     let peer_id = keypair.to_peer_id();
     let transport = QuicConfig::new(keypair)
         .listen_on("/ip4/127.0.0.1/udp/0/quic".parse()?)
