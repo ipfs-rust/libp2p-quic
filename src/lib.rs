@@ -14,6 +14,10 @@ use libp2p::core::transport::TransportError;
 use libp2p::Multiaddr;
 use thiserror::Error;
 
+pub fn generate_keypair() -> Keypair {
+    Keypair::generate(&mut rand_core::OsRng {})
+}
+
 /// Quic configuration.
 pub struct QuicConfig {
     pub keypair: Keypair,
