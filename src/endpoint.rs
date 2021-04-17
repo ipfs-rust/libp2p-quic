@@ -1,9 +1,9 @@
 use crate::muxer::QuicMuxer;
-use crate::noise::{NoiseConfig, NoiseSession};
-use crate::{QuicConfig, QuicError};
+use crate::{PublicKey, QuicConfig, QuicError};
 use fnv::FnvHashMap;
 use futures::channel::{mpsc, oneshot};
 use futures::prelude::*;
+use quinn_noise::{NoiseConfig, NoiseSession};
 use quinn_proto::generic::{ClientConfig, ServerConfig};
 use quinn_proto::{
     ConnectionEvent, ConnectionHandle, DatagramEvent, EcnCodepoint, EndpointEvent, Transmit,
@@ -25,6 +25,8 @@ enum ToEndpoint {
     Dial {
         /// UDP address to connect to.
         addr: SocketAddr,
+        /// The remotes public key.
+        public_key: PublicKey,
         /// Channel to return the result of the dialing to.
         tx: oneshot::Sender<Result<QuicMuxer, QuicError>>,
     },
@@ -47,9 +49,9 @@ pub struct TransportChannel {
 }
 
 impl TransportChannel {
-    pub fn dial(&mut self, addr: SocketAddr) -> oneshot::Receiver<Result<QuicMuxer, QuicError>> {
+    pub fn dial(&mut self, addr: SocketAddr, public_key: PublicKey) -> oneshot::Receiver<Result<QuicMuxer, QuicError>> {
         let (tx, rx) = oneshot::channel();
-        let msg = ToEndpoint::Dial { addr, tx };
+        let msg = ToEndpoint::Dial { addr, public_key, tx };
         self.tx.unbounded_send(msg).expect("endpoint has crashed");
         rx
     }
@@ -161,15 +163,15 @@ impl EndpointConfig {
         config.transport.datagram_receive_buffer_size(None);
         let transport = Arc::new(config.transport);
 
-        let noise_config = Arc::new(NoiseConfig {
-            params: config.noise,
-            keypair: config.keypair,
-            prologue: config.prologue,
-        });
+        let noise_config = NoiseConfig {
+            keypair: Some(config.keypair),
+            psk: config.psk,
+            remote_public_key: None,
+        };
 
         let mut server_config = ServerConfig::<NoiseSession>::default();
         server_config.transport = transport.clone();
-        server_config.crypto = noise_config.clone();
+        server_config.crypto = Arc::new(noise_config.clone());
 
         let client_config = ClientConfig::<NoiseSession> {
             transport,
@@ -272,8 +274,9 @@ impl Future for Endpoint {
 
         while let Poll::Ready(event) = me.channel.poll_next_event(cx) {
             match event {
-                Some(ToEndpoint::Dial { addr, tx }) => {
-                    let client_config = me.client_config.clone();
+                Some(ToEndpoint::Dial { addr, public_key, tx }) => {
+                    let mut client_config = me.client_config.clone();
+                    client_config.crypto.remote_public_key = Some(public_key);
                     let (id, connection) =
                         match me.endpoint.connect(client_config, addr, "server_name") {
                             Ok(c) => c,

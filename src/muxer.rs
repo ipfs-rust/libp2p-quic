@@ -1,11 +1,12 @@
 use crate::endpoint::ConnectionChannel;
-use crate::noise::NoiseSession;
+use crate::noise::ToLibp2p;
 use async_io::Timer;
 use fnv::FnvHashMap;
 use futures::prelude::*;
 use libp2p::core::muxing::{StreamMuxer, StreamMuxerEvent};
 use libp2p::{Multiaddr, PeerId};
 use parking_lot::Mutex;
+use quinn_noise::NoiseSession;
 use quinn_proto::crypto::Session;
 use quinn_proto::generic::Connection;
 use quinn_proto::{
@@ -79,6 +80,7 @@ impl QuicMuxer {
             .connection
             .crypto_session()
             .peer_identity()
+            .map(|pk| pk.to_peer_id())
     }
 
     pub fn local_addr(&self) -> Multiaddr {

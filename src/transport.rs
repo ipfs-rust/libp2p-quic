@@ -1,7 +1,7 @@
 use crate::endpoint::{EndpointConfig, TransportChannel};
 use crate::muxer::QuicMuxer;
 use crate::noise::NoiseUpgrade;
-use crate::{QuicConfig, QuicError};
+use crate::{PublicKey, QuicConfig, QuicError};
 use futures::channel::oneshot;
 use futures::prelude::*;
 use if_watch::{IfEvent, IfWatcher};
@@ -28,7 +28,7 @@ impl QuicTransport {
         addr: Multiaddr,
     ) -> Result<Self, TransportError<QuicError>> {
         let socket_addr = multiaddr_to_socketaddr(&addr)
-            .map_err(|_| TransportError::MultiaddrNotSupported(addr.clone()))?;
+            .map_err(|_| TransportError::MultiaddrNotSupported(addr.clone()))?.0;
         let addresses = if socket_addr.ip().is_unspecified() {
             let watcher = IfWatcher::new()
                 .await
@@ -84,13 +84,18 @@ impl Transport for QuicTransport {
     }
 
     fn dial(self, addr: Multiaddr) -> Result<Self::Dial, TransportError<Self::Error>> {
-        let socket_addr = multiaddr_to_socketaddr(&addr)
-            .map_err(|_| TransportError::MultiaddrNotSupported(addr.clone()))?;
+        let (socket_addr, public_key) = if let Ok((socket_addr, Some(public_key))) = multiaddr_to_socketaddr(&addr) {
+            (socket_addr, public_key)
+        } else {
+            tracing::debug!("invalid multiaddr");
+            return Err(TransportError::MultiaddrNotSupported(addr.clone()));
+        };
         if socket_addr.port() == 0 || socket_addr.ip().is_unspecified() {
+            tracing::debug!("invalid multiaddr");
             return Err(TransportError::MultiaddrNotSupported(addr));
         }
         tracing::debug!("dialing {}", socket_addr);
-        let rx = self.inner.lock().channel.dial(socket_addr);
+        let rx = self.inner.lock().channel.dial(socket_addr, public_key);
         Ok(QuicDial::Connecting(rx))
     }
 
@@ -179,15 +184,28 @@ impl Future for QuicDial {
 
 /// Tries to turn a QUIC multiaddress into a UDP [`SocketAddr`]. Returns an error if the format
 /// of the multiaddr is wrong.
-fn multiaddr_to_socketaddr(addr: &Multiaddr) -> Result<SocketAddr, ()> {
+fn multiaddr_to_socketaddr(addr: &Multiaddr) -> Result<(SocketAddr, Option<PublicKey>), ()> {
     let mut iter = addr.iter().peekable();
     let proto1 = iter.next().ok_or(())?;
     let proto2 = iter.next().ok_or(())?;
     let proto3 = iter.next().ok_or(())?;
 
-    if let Some(Protocol::P2p(_)) = iter.peek() {
+    let peer_id = if let Some(Protocol::P2p(peer_id)) = iter.peek() {
+        if peer_id.code() != multihash::Code::Identity.into() {
+            return Err(());
+        }
+        let public_key = libp2p::core::PublicKey::from_protobuf_encoding(peer_id.digest()).map_err(|_| ())?;
+        let public_key = if let libp2p::core::PublicKey::Ed25519(public_key) = public_key {
+            public_key.encode()
+        } else {
+            return Err(());
+        };
+        let public_key = PublicKey::from_bytes(&public_key).map_err(|_| ())?;
         iter.next();
-    }
+        Some(public_key)
+    } else {
+        None
+    };
 
     if iter.next().is_some() {
         return Err(());
@@ -195,10 +213,10 @@ fn multiaddr_to_socketaddr(addr: &Multiaddr) -> Result<SocketAddr, ()> {
 
     match (proto1, proto2, proto3) {
         (Protocol::Ip4(ip), Protocol::Udp(port), Protocol::Quic) => {
-            Ok(SocketAddr::new(ip.into(), port))
+            Ok((SocketAddr::new(ip.into(), port), peer_id))
         }
         (Protocol::Ip6(ip), Protocol::Udp(port), Protocol::Quic) => {
-            Ok(SocketAddr::new(ip.into(), port))
+            Ok((SocketAddr::new(ip.into(), port), peer_id))
         }
         _ => Err(()),
     }
@@ -231,10 +249,10 @@ mod tests {
                     .parse::<Multiaddr>()
                     .unwrap()
             ),
-            Ok(SocketAddr::new(
+            Ok((SocketAddr::new(
                 IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
                 12345,
-            ))
+            ), None))
         );
         assert_eq!(
             multiaddr_to_socketaddr(
@@ -242,17 +260,17 @@ mod tests {
                     .parse::<Multiaddr>()
                     .unwrap()
             ),
-            Ok(SocketAddr::new(
+            Ok((SocketAddr::new(
                 IpAddr::V4(Ipv4Addr::new(255, 255, 255, 255)),
                 8080,
-            ))
+            ), None))
         );
         assert_eq!(
             multiaddr_to_socketaddr(&"/ip6/::1/udp/12345/quic".parse::<Multiaddr>().unwrap()),
-            Ok(SocketAddr::new(
+            Ok((SocketAddr::new(
                 IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1)),
                 12345,
-            ))
+            ), None))
         );
         assert_eq!(
             multiaddr_to_socketaddr(
@@ -260,12 +278,12 @@ mod tests {
                     .parse::<Multiaddr>()
                     .unwrap()
             ),
-            Ok(SocketAddr::new(
+            Ok((SocketAddr::new(
                 IpAddr::V6(Ipv6Addr::new(
                     65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535,
                 )),
                 8080,
-            ))
+            ), None))
         );
     }
 }

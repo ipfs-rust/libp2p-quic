@@ -6,9 +6,8 @@ mod transport;
 pub use crate::muxer::{QuicMuxer, QuicMuxerError};
 pub use crate::noise::ToLibp2p;
 pub use crate::transport::{QuicDial, QuicTransport};
-pub use ed25519_dalek::Keypair;
+pub use quinn_noise::{Keypair, PublicKey};
 pub use quinn_proto::{ConfigError, ConnectError, ConnectionError, TransportConfig};
-pub use snow::params::NoiseParams;
 
 use libp2p::core::transport::TransportError;
 use libp2p::Multiaddr;
@@ -21,8 +20,7 @@ pub fn generate_keypair() -> Keypair {
 /// Quic configuration.
 pub struct QuicConfig {
     pub keypair: Keypair,
-    pub noise: NoiseParams,
-    pub prologue: Vec<u8>,
+    pub psk: Option<[u8; 32]>,
     pub transport: TransportConfig,
 }
 
@@ -30,8 +28,7 @@ impl Default for QuicConfig {
     fn default() -> Self {
         Self {
             keypair: Keypair::generate(&mut rand_core::OsRng {}),
-            noise: "Noise_XX_25519_AESGCM_SHA256".parse().unwrap(),
-            prologue: vec![],
+            psk: None,
             transport: TransportConfig::default(),
         }
     }
@@ -41,8 +38,7 @@ impl std::fmt::Debug for QuicConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         f.debug_struct("QuicConfig")
             .field("keypair", &self.keypair.public)
-            .field("noise", &self.noise)
-            .field("prologue", &self.prologue)
+            .field("psk", &self.psk)
             .field("transport", &self.transport)
             .finish()
     }

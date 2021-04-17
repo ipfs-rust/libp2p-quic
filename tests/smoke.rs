@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use futures::future::FutureExt;
 use futures::io::{AsyncRead, AsyncWrite};
 use libp2p::core::upgrade::{read_one, write_one};
+use libp2p::multiaddr::Protocol;
 use libp2p::request_response::{
     ProtocolName, ProtocolSupport, RequestResponse, RequestResponseCodec, RequestResponseConfig,
     RequestResponseEvent, RequestResponseMessage,
@@ -41,10 +42,11 @@ async fn smoke() -> Result<()> {
 
     Swarm::listen_on(&mut a, "/ip4/127.0.0.1/udp/0/quic".parse()?)?;
 
-    let addr = match a.next_event().await {
+    let mut addr = match a.next_event().await {
         SwarmEvent::NewListenAddr(addr) => addr,
         e => panic!("{:?}", e),
     };
+    addr.push(Protocol::P2p((*a.local_peer_id()).into()));
 
     let mut data = vec![0; 4096 * 10];
     rng.fill_bytes(&mut data);
