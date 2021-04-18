@@ -2188,6 +2188,7 @@ dependencies = [
 [[package]]
 name = "xoodyak"
 version = "0.7.0"
+source = "git+https://github.com/dvc94ch/rust-xoodyak#1bb91457cef0d8452c58ac59a138d201ef96285f"
 dependencies = [
  "rawbytes",
  "zeroize",

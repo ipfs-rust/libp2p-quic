@@ -1,5 +1,5 @@
 use crate::endpoint::ConnectionChannel;
-use crate::noise::ToLibp2p;
+use crate::ToLibp2p;
 use async_io::Timer;
 use fnv::FnvHashMap;
 use futures::prelude::*;
@@ -74,13 +74,14 @@ impl QuicMuxer {
         self.inner.lock().connection.is_handshaking()
     }
 
-    pub fn peer_id(&self) -> Option<PeerId> {
+    pub fn peer_id(&self) -> PeerId {
         self.inner
             .lock()
             .connection
             .crypto_session()
             .peer_identity()
-            .map(|pk| pk.to_peer_id())
+            .expect("In an IK handshake the PeerId is always available")
+            .to_peer_id()
     }
 
     pub fn local_addr(&self) -> Multiaddr {

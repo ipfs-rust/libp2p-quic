@@ -1,16 +1,14 @@
 mod endpoint;
 mod muxer;
-mod noise;
 mod transport;
 
 pub use crate::muxer::{QuicMuxer, QuicMuxerError};
-pub use crate::noise::ToLibp2p;
 pub use crate::transport::{QuicDial, QuicTransport};
 pub use quinn_noise::{Keypair, PublicKey};
 pub use quinn_proto::{ConfigError, ConnectError, ConnectionError, TransportConfig};
 
 use libp2p::core::transport::TransportError;
-use libp2p::Multiaddr;
+use libp2p::{Multiaddr, PeerId};
 use thiserror::Error;
 
 pub fn generate_keypair() -> Keypair {
@@ -74,4 +72,36 @@ pub enum QuicError {
     Io(#[from] std::io::Error),
     #[error("a `StreamMuxerEvent` was generated before the handshake was complete.")]
     UpgradeError,
+}
+
+pub trait ToLibp2p {
+    fn to_keypair(&self) -> libp2p::identity::Keypair;
+    fn to_public(&self) -> libp2p::identity::PublicKey;
+    fn to_peer_id(&self) -> PeerId {
+        self.to_public().into_peer_id()
+    }
+}
+
+impl ToLibp2p for Keypair {
+    fn to_keypair(&self) -> libp2p::identity::Keypair {
+        let mut secret_key = self.secret.to_bytes();
+        let secret_key = libp2p::identity::ed25519::SecretKey::from_bytes(&mut secret_key).unwrap();
+        libp2p::identity::Keypair::Ed25519(secret_key.into())
+    }
+
+    fn to_public(&self) -> libp2p::identity::PublicKey {
+        self.public.to_public()
+    }
+}
+
+impl ToLibp2p for PublicKey {
+    fn to_keypair(&self) -> libp2p::identity::Keypair {
+        panic!("wtf?");
+    }
+
+    fn to_public(&self) -> libp2p::identity::PublicKey {
+        let public_key = self.to_bytes();
+        let public_key = libp2p::identity::ed25519::PublicKey::decode(&public_key[..]).unwrap();
+        libp2p::identity::PublicKey::Ed25519(public_key.into())
+    }
 }

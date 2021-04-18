@@ -49,9 +49,17 @@ pub struct TransportChannel {
 }
 
 impl TransportChannel {
-    pub fn dial(&mut self, addr: SocketAddr, public_key: PublicKey) -> oneshot::Receiver<Result<QuicMuxer, QuicError>> {
+    pub fn dial(
+        &mut self,
+        addr: SocketAddr,
+        public_key: PublicKey,
+    ) -> oneshot::Receiver<Result<QuicMuxer, QuicError>> {
         let (tx, rx) = oneshot::channel();
-        let msg = ToEndpoint::Dial { addr, public_key, tx };
+        let msg = ToEndpoint::Dial {
+            addr,
+            public_key,
+            tx,
+        };
         self.tx.unbounded_send(msg).expect("endpoint has crashed");
         rx
     }
@@ -274,7 +282,11 @@ impl Future for Endpoint {
 
         while let Poll::Ready(event) = me.channel.poll_next_event(cx) {
             match event {
-                Some(ToEndpoint::Dial { addr, public_key, tx }) => {
+                Some(ToEndpoint::Dial {
+                    addr,
+                    public_key,
+                    tx,
+                }) => {
                     let mut client_config = me.client_config.clone();
                     client_config.crypto.remote_public_key = Some(public_key);
                     let (id, connection) =
