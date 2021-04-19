@@ -117,8 +117,8 @@ impl StreamMuxer for QuicMuxer {
             inner.connection.handle_event(event);
         }
 
-        let _max_datagrams = inner.endpoint.max_datagrams();
-        while let Some(transmit) = inner.connection.poll_transmit(now) {
+        let max_datagrams = inner.endpoint.max_datagrams();
+        while let Some(transmit) = inner.connection.poll_transmit(now, max_datagrams) {
             inner.endpoint.send_transmit(transmit);
         }
 
