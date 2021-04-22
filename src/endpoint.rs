@@ -186,7 +186,11 @@ impl EndpointConfig {
             crypto: noise_config,
         };
 
-        let endpoint_config = QuinnEndpointConfig::default();
+        let mut endpoint_config = QuinnEndpointConfig::default();
+        endpoint_config.supported_versions(
+            quinn_noise::SUPPORTED_QUIC_VERSIONS.to_vec(),
+            quinn_noise::DEFAULT_QUIC_VERSION,
+        )?;
 
         let socket = UdpSocket::bind(addr)?;
         let port = socket.local_addr()?.port();
