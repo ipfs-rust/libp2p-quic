@@ -4,11 +4,12 @@ mod transport;
 
 pub use crate::muxer::{QuicMuxer, QuicMuxerError};
 pub use crate::transport::{QuicDial, QuicTransport};
-pub use quinn_noise::{Keypair, PublicKey};
+pub use quinn_noise::{KeyLog, KeyLogFile, Keypair, PublicKey};
 pub use quinn_proto::{ConfigError, ConnectError, ConnectionError, TransportConfig};
 
 use libp2p::core::transport::TransportError;
 use libp2p::{Multiaddr, PeerId};
+use std::sync::Arc;
 use thiserror::Error;
 
 pub fn generate_keypair() -> Keypair {
@@ -20,6 +21,7 @@ pub struct QuicConfig {
     pub keypair: Keypair,
     pub psk: Option<[u8; 32]>,
     pub transport: TransportConfig,
+    pub keylogger: Option<Arc<dyn KeyLog>>,
 }
 
 impl Default for QuicConfig {
@@ -28,6 +30,7 @@ impl Default for QuicConfig {
             keypair: Keypair::generate(&mut rand_core::OsRng {}),
             psk: None,
             transport: TransportConfig::default(),
+            keylogger: None,
         }
     }
 }
@@ -49,6 +52,12 @@ impl QuicConfig {
             keypair,
             ..Default::default()
         }
+    }
+
+    /// Enable keylogging.
+    pub fn enable_keylogger(&mut self) -> &mut Self {
+        self.keylogger = Some(Arc::new(KeyLogFile::new()));
+        self
     }
 
     /// Spawns a new endpoint.

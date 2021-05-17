@@ -13,10 +13,14 @@ use libp2p_quic::{Keypair, QuicConfig, ToLibp2p};
 use rand::RngCore;
 use std::{io, iter};
 
-async fn create_swarm() -> Result<Swarm<RequestResponse<PingCodec>>> {
+async fn create_swarm(keylog: bool) -> Result<Swarm<RequestResponse<PingCodec>>> {
     let keypair = Keypair::generate(&mut rand_core::OsRng {});
     let peer_id = keypair.to_peer_id();
-    let transport = QuicConfig::new(keypair)
+    let mut transport = QuicConfig::new(keypair);
+    if keylog {
+        transport.enable_keylogger();
+    }
+    let transport = transport
         .listen_on("/ip4/127.0.0.1/udp/0/quic".parse()?)
         .await?
         .boxed();
@@ -37,8 +41,8 @@ async fn smoke() -> Result<()> {
     log_panics::init();
     let mut rng = rand::thread_rng();
 
-    let mut a = create_swarm().await?;
-    let mut b = create_swarm().await?;
+    let mut a = create_swarm(true).await?;
+    let mut b = create_swarm(false).await?;
 
     Swarm::listen_on(&mut a, "/ip4/127.0.0.1/udp/0/quic".parse()?)?;
 

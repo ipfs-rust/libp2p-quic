@@ -18,7 +18,7 @@ if-watch = "0.2.2"
 libp2p = { version = "0.37.1", default-features = false }
 parking_lot = "0.11.1"
 quinn-proto = { version = "0.7.3", default-features = false }
-quinn-noise = "0.1.0"
+quinn-noise = "0.2.0"
 rand_core = "0.5.1"
 thiserror = "1.0.24"
 tracing = "0.1.26"

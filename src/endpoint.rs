@@ -175,6 +175,7 @@ impl EndpointConfig {
             keypair: Some(config.keypair),
             psk: config.psk,
             remote_public_key: None,
+            keylogger: config.keylogger,
         };
 
         let mut server_config = ServerConfig::<NoiseSession>::default();
