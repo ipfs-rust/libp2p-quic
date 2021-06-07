@@ -841,9 +841,9 @@ checksum = "18794a8ad5b29321f790b55d93dfba91e125cb1a9edbd4f8e3150acc771c1a5e"
 
 [[package]]
 name = "libp2p"
-version = "0.37.1"
+version = "0.38.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08053fbef67cd777049ef7a95ebaca2ece370b4ed7712c3fa404d69a88cb741b"
+checksum = "ebbb17eece4aec5bb970880c73825c16ca59ca05a4e41803751e68c7e5f0c618"
 dependencies = [
  "atomic",
  "bytes",
@@ -896,7 +896,7 @@ dependencies = [
 
 [[package]]
 name = "libp2p-quic"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-global-executor",

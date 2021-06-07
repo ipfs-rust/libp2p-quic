@@ -1,6 +1,6 @@
 [package]
 name = "libp2p-quic"
-version = "0.3.1"
+version = "0.4.0"
 authors = ["David Craven <david@craven.ch>"]
 edition = "2018"
 description = "libp2p-quic is a noise based quic implementation for rust-libp2p."
@@ -15,7 +15,8 @@ bytes = "1.0.1"
 fnv = "1.0.7"
 futures = "0.3.14"
 if-watch = "0.2.2"
-libp2p = { version = "0.37.1", default-features = false }
+libp2p = { version = "0.38.0", default-features = false }
+multihash = { version = "0.13.2", default-features = false }
 parking_lot = "0.11.1"
 quinn-proto = { version = "0.7.3", default-features = false }
 quinn-noise = "0.2.0"
@@ -23,12 +24,11 @@ rand_core = "0.5.1"
 thiserror = "1.0.24"
 tracing = "0.1.26"
 udp-socket = "0.1.5"
-multihash = { version = "0.13.2", default-features = false }
 
 [dev-dependencies]
 async-std = { version = "1.9.0", features = ["attributes"] }
 async-trait = "0.1.50"
-libp2p = { version = "0.37.1", default-features = false, features = ["request-response"] }
+libp2p = { version = "0.38.0", default-features = false, features = ["request-response"] }
 log-panics = "2.0.0"
 rand = "0.8.3"
 tracing-subscriber = "0.2.18"
