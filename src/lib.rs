@@ -4,7 +4,7 @@ mod transport;
 
 pub use crate::muxer::{QuicMuxer, QuicMuxerError};
 pub use crate::transport::{QuicDial, QuicTransport};
-pub use quinn_noise::{KeyLog, KeyLogFile, Keypair, PublicKey};
+pub use quinn_noise::{KeyLog, KeyLogFile, Keypair, PublicKey, SecretKey};
 pub use quinn_proto::{ConfigError, ConnectError, ConnectionError, TransportConfig};
 
 use libp2p::core::transport::TransportError;
