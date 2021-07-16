@@ -1,8 +1,9 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use futures::future::FutureExt;
-use futures::io::{AsyncRead, AsyncWrite};
-use libp2p::core::upgrade::{read_one, write_one};
+use futures::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use futures::stream::StreamExt;
+use libp2p::core::upgrade;
 use libp2p::request_response::{
     ProtocolName, ProtocolSupport, RequestResponse, RequestResponseCodec, RequestResponseConfig,
     RequestResponseEvent, RequestResponseMessage,
@@ -46,8 +47,8 @@ async fn main() -> Result<()> {
 
     Swarm::listen_on(&mut a, "/ip4/127.0.0.1/udp/0/quic".parse()?)?;
 
-    let addr = match a.next_event().await {
-        SwarmEvent::NewListenAddr(addr) => addr,
+    let addr = match a.next().await {
+        Some(SwarmEvent::NewListenAddr { address, .. }) => address,
         e => panic!("{:?}", e),
     };
 
@@ -65,27 +66,27 @@ async fn main() -> Result<()> {
     let mut res = 0;
     while res < 1024 {
         futures::select! {
-            event = a.next_event().fuse() => match event {
-                SwarmEvent::Behaviour(RequestResponseEvent::Message {
+            event = a.next().fuse() => match event {
+                Some(SwarmEvent::Behaviour(RequestResponseEvent::Message {
                     message: RequestResponseMessage::Request {
                         request: Ping(ping),
                         channel,
                         ..
                     },
                     ..
-                }) => {
+                })) => {
                     a.behaviour_mut().send_response(channel, Pong(ping)).unwrap();
                 }
                 _ => {}
             },
-            event = b.next_event().fuse() => match event {
-                SwarmEvent::Behaviour(RequestResponseEvent::Message {
+            event = b.next().fuse() => match event {
+                Some(SwarmEvent::Behaviour(RequestResponseEvent::Message {
                     message: RequestResponseMessage::Response {
                         response: Pong(pong),
                         ..
                     },
                     ..
-                }) => {
+                })) => {
                     assert_eq!(data, pong);
                     res += 1;
                 }
@@ -125,26 +126,28 @@ impl RequestResponseCodec for PingCodec {
     where
         T: AsyncRead + Unpin + Send,
     {
-        read_one(io, 4096 * 10)
+        let req = upgrade::read_length_prefixed(io, 4096 * 10)
             .map(|res| match res {
                 Err(e) => Err(io::Error::new(io::ErrorKind::InvalidData, e)),
                 Ok(vec) if vec.is_empty() => Err(io::ErrorKind::UnexpectedEof.into()),
                 Ok(vec) => Ok(Ping(vec)),
             })
-            .await
+            .await?;
+        Ok(req)
     }
 
     async fn read_response<T>(&mut self, _: &PingProtocol, io: &mut T) -> io::Result<Self::Response>
     where
         T: AsyncRead + Unpin + Send,
     {
-        read_one(io, 4096 * 10)
+        let res = upgrade::read_length_prefixed(io, 4096 * 10)
             .map(|res| match res {
                 Err(e) => Err(io::Error::new(io::ErrorKind::InvalidData, e)),
                 Ok(vec) if vec.is_empty() => Err(io::ErrorKind::UnexpectedEof.into()),
                 Ok(vec) => Ok(Pong(vec)),
             })
-            .await
+            .await?;
+        Ok(res)
     }
 
     async fn write_request<T>(
@@ -156,7 +159,9 @@ impl RequestResponseCodec for PingCodec {
     where
         T: AsyncWrite + Unpin + Send,
     {
-        write_one(io, data).await
+        upgrade::write_length_prefixed(io, data).await?;
+        io.close().await?;
+        Ok(())
     }
 
     async fn write_response<T>(
@@ -168,6 +173,8 @@ impl RequestResponseCodec for PingCodec {
     where
         T: AsyncWrite + Unpin + Send,
     {
-        write_one(io, data).await
+        upgrade::write_length_prefixed(io, data).await?;
+        io.close().await?;
+        Ok(())
     }
 }

@@ -1,8 +1,9 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use futures::future::FutureExt;
-use futures::io::{AsyncRead, AsyncWrite};
-use libp2p::core::upgrade::{read_one, write_one};
+use futures::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use futures::stream::StreamExt;
+use libp2p::core::upgrade;
 use libp2p::multiaddr::Protocol;
 use libp2p::request_response::{
     ProtocolName, ProtocolSupport, RequestResponse, RequestResponseCodec, RequestResponseConfig,
@@ -46,8 +47,8 @@ async fn smoke() -> Result<()> {
 
     Swarm::listen_on(&mut a, "/ip4/127.0.0.1/udp/0/quic".parse()?)?;
 
-    let mut addr = match a.next_event().await {
-        SwarmEvent::NewListenAddr(addr) => addr,
+    let mut addr = match a.next().await {
+        Some(SwarmEvent::NewListenAddr { address, .. }) => address,
         e => panic!("{:?}", e),
     };
     addr.push(Protocol::P2p((*a.local_peer_id()).into()));
@@ -60,30 +61,30 @@ async fn smoke() -> Result<()> {
     b.behaviour_mut()
         .send_request(&Swarm::local_peer_id(&a), Ping(data.clone()));
 
-    match b.next_event().await {
-        SwarmEvent::Dialing(_) => {}
+    match b.next().await {
+        Some(SwarmEvent::Dialing(_)) => {}
         e => panic!("{:?}", e),
     }
 
-    match a.next_event().await {
-        SwarmEvent::IncomingConnection { .. } => {}
+    match a.next().await {
+        Some(SwarmEvent::IncomingConnection { .. }) => {}
         e => panic!("{:?}", e),
     };
 
-    match b.next_event().await {
-        SwarmEvent::ConnectionEstablished { .. } => {}
+    match b.next().await {
+        Some(SwarmEvent::ConnectionEstablished { .. }) => {}
         e => panic!("{:?}", e),
     };
 
-    match a.next_event().await {
-        SwarmEvent::ConnectionEstablished { .. } => {}
+    match a.next().await {
+        Some(SwarmEvent::ConnectionEstablished { .. }) => {}
         e => panic!("{:?}", e),
     };
 
-    assert!(b.next_event().now_or_never().is_none());
+    assert!(b.next().now_or_never().is_none());
 
-    match a.next_event().await {
-        SwarmEvent::Behaviour(RequestResponseEvent::Message {
+    match a.next().await {
+        Some(SwarmEvent::Behaviour(RequestResponseEvent::Message {
             message:
                 RequestResponseMessage::Request {
                     request: Ping(ping),
@@ -91,7 +92,7 @@ async fn smoke() -> Result<()> {
                     ..
                 },
             ..
-        }) => {
+        })) => {
             a.behaviour_mut()
                 .send_response(channel, Pong(ping))
                 .unwrap();
@@ -99,20 +100,20 @@ async fn smoke() -> Result<()> {
         e => panic!("{:?}", e),
     }
 
-    match a.next_event().await {
-        SwarmEvent::Behaviour(RequestResponseEvent::ResponseSent { .. }) => {}
+    match a.next().await {
+        Some(SwarmEvent::Behaviour(RequestResponseEvent::ResponseSent { .. })) => {}
         e => panic!("{:?}", e),
     }
 
-    match b.next_event().await {
-        SwarmEvent::Behaviour(RequestResponseEvent::Message {
+    match b.next().await {
+        Some(SwarmEvent::Behaviour(RequestResponseEvent::Message {
             message:
                 RequestResponseMessage::Response {
                     response: Pong(pong),
                     ..
                 },
             ..
-        }) => assert_eq!(data, pong),
+        })) => assert_eq!(data, pong),
         e => panic!("{:?}", e),
     }
 
@@ -121,10 +122,10 @@ async fn smoke() -> Result<()> {
         Ping(b"another substream".to_vec()),
     );
 
-    assert!(a.next_event().now_or_never().is_none());
+    assert!(a.next().now_or_never().is_none());
 
-    match b.next_event().await {
-        SwarmEvent::Behaviour(RequestResponseEvent::Message {
+    match b.next().await {
+        Some(SwarmEvent::Behaviour(RequestResponseEvent::Message {
             message:
                 RequestResponseMessage::Request {
                     request: Ping(data),
@@ -132,7 +133,7 @@ async fn smoke() -> Result<()> {
                     ..
                 },
             ..
-        }) => {
+        })) => {
             b.behaviour_mut()
                 .send_response(channel, Pong(data))
                 .unwrap();
@@ -140,20 +141,20 @@ async fn smoke() -> Result<()> {
         e => panic!("{:?}", e),
     }
 
-    match b.next_event().await {
-        SwarmEvent::Behaviour(RequestResponseEvent::ResponseSent { .. }) => {}
+    match b.next().await {
+        Some(SwarmEvent::Behaviour(RequestResponseEvent::ResponseSent { .. })) => {}
         e => panic!("{:?}", e),
     }
 
-    match a.next_event().await {
-        SwarmEvent::Behaviour(RequestResponseEvent::Message {
+    match a.next().await {
+        Some(SwarmEvent::Behaviour(RequestResponseEvent::Message {
             message:
                 RequestResponseMessage::Response {
                     response: Pong(data),
                     ..
                 },
             ..
-        }) => assert_eq!(data, b"another substream".to_vec()),
+        })) => assert_eq!(data, b"another substream".to_vec()),
         e => panic!("{:?}", e),
     }
 
@@ -188,7 +189,7 @@ impl RequestResponseCodec for PingCodec {
     where
         T: AsyncRead + Unpin + Send,
     {
-        read_one(io, 4096 * 10)
+        upgrade::read_length_prefixed(io, 4096 * 10)
             .map(|res| match res {
                 Err(e) => Err(io::Error::new(io::ErrorKind::InvalidData, e)),
                 Ok(vec) if vec.is_empty() => Err(io::ErrorKind::UnexpectedEof.into()),
@@ -201,7 +202,7 @@ impl RequestResponseCodec for PingCodec {
     where
         T: AsyncRead + Unpin + Send,
     {
-        read_one(io, 4096 * 10)
+        upgrade::read_length_prefixed(io, 4096 * 10)
             .map(|res| match res {
                 Err(e) => Err(io::Error::new(io::ErrorKind::InvalidData, e)),
                 Ok(vec) if vec.is_empty() => Err(io::ErrorKind::UnexpectedEof.into()),
@@ -219,7 +220,9 @@ impl RequestResponseCodec for PingCodec {
     where
         T: AsyncWrite + Unpin + Send,
     {
-        write_one(io, data).await
+        upgrade::write_length_prefixed(io, data).await?;
+        io.close().await?;
+        Ok(())
     }
 
     async fn write_response<T>(
@@ -231,6 +234,8 @@ impl RequestResponseCodec for PingCodec {
     where
         T: AsyncWrite + Unpin + Send,
     {
-        write_one(io, data).await
+        upgrade::write_length_prefixed(io, data).await?;
+        io.close().await?;
+        Ok(())
     }
 }
