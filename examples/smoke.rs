@@ -9,14 +9,14 @@ use libp2p::request_response::{
     RequestResponseEvent, RequestResponseMessage,
 };
 use libp2p::swarm::{Swarm, SwarmBuilder, SwarmEvent};
-use libp2p_quic::{Keypair, QuicConfig, ToLibp2p};
+use libp2p_quic::{Keypair, NoiseCrypto, QuicConfig, ToLibp2p};
 use rand::RngCore;
 use std::{io, iter};
 
 async fn create_swarm() -> Result<Swarm<RequestResponse<PingCodec>>> {
     let keypair = Keypair::generate(&mut rand_core::OsRng {});
     let peer_id = keypair.to_peer_id();
-    let transport = QuicConfig::new(keypair)
+    let transport = QuicConfig::<NoiseCrypto>::new(keypair)
         .listen_on("/ip4/127.0.0.1/udp/0/quic".parse()?)
         .await?
         .boxed();
@@ -66,31 +66,29 @@ async fn main() -> Result<()> {
     let mut res = 0;
     while res < 1024 {
         futures::select! {
-            event = a.next().fuse() => match event {
-                Some(SwarmEvent::Behaviour(RequestResponseEvent::Message {
+            event = a.next().fuse() => {
+                if let Some(SwarmEvent::Behaviour(RequestResponseEvent::Message {
                     message: RequestResponseMessage::Request {
                         request: Ping(ping),
                         channel,
                         ..
                     },
                     ..
-                })) => {
+                })) = event {
                     a.behaviour_mut().send_response(channel, Pong(ping)).unwrap();
                 }
-                _ => {}
             },
-            event = b.next().fuse() => match event {
-                Some(SwarmEvent::Behaviour(RequestResponseEvent::Message {
+            event = b.next().fuse() => {
+                if let Some(SwarmEvent::Behaviour(RequestResponseEvent::Message {
                     message: RequestResponseMessage::Response {
                         response: Pong(pong),
                         ..
                     },
                     ..
-                })) => {
+                })) = event  {
                     assert_eq!(data, pong);
                     res += 1;
                 }
-                _ => {}
             }
         }
     }

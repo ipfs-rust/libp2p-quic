@@ -1,9 +1,11 @@
+use crate::crypto::{Crypto, CryptoConfig};
 use crate::muxer::QuicMuxer;
-use crate::{PublicKey, QuicConfig, QuicError};
+use crate::{QuicConfig, QuicError};
+use ed25519_dalek::PublicKey;
 use fnv::FnvHashMap;
 use futures::channel::{mpsc, oneshot};
 use futures::prelude::*;
-use quinn_noise::{NoiseConfig, NoiseSession};
+use quinn_proto::crypto::Session;
 use quinn_proto::generic::{ClientConfig, ServerConfig};
 use quinn_proto::{
     ConnectionEvent, ConnectionHandle, DatagramEvent, EcnCodepoint, EndpointEvent, Transmit,
@@ -20,7 +22,7 @@ use udp_socket::{RecvMeta, SocketType, UdpCapabilities, UdpSocket, BATCH_SIZE};
 
 /// Message sent to the endpoint background task.
 #[derive(Debug)]
-enum ToEndpoint {
+enum ToEndpoint<C: Crypto> {
     /// Instructs the endpoint to start connecting to the given address.
     Dial {
         /// UDP address to connect to.
@@ -28,7 +30,7 @@ enum ToEndpoint {
         /// The remotes public key.
         public_key: PublicKey,
         /// Channel to return the result of the dialing to.
-        tx: oneshot::Sender<Result<QuicMuxer, QuicError>>,
+        tx: oneshot::Sender<Result<QuicMuxer<C>, QuicError>>,
     },
     /// Sent by a `quinn_proto` connection when the endpoint needs to process an event generated
     /// by a connection. The event itself is opaque to us.
@@ -41,19 +43,19 @@ enum ToEndpoint {
 }
 
 #[derive(Debug)]
-pub struct TransportChannel {
-    tx: mpsc::UnboundedSender<ToEndpoint>,
-    rx: mpsc::UnboundedReceiver<Result<QuicMuxer, QuicError>>,
+pub struct TransportChannel<C: Crypto> {
+    tx: mpsc::UnboundedSender<ToEndpoint<C>>,
+    rx: mpsc::UnboundedReceiver<Result<QuicMuxer<C>, QuicError>>,
     port: u16,
     ty: SocketType,
 }
 
-impl TransportChannel {
+impl<C: Crypto> TransportChannel<C> {
     pub fn dial(
         &mut self,
         addr: SocketAddr,
         public_key: PublicKey,
-    ) -> oneshot::Receiver<Result<QuicMuxer, QuicError>> {
+    ) -> oneshot::Receiver<Result<QuicMuxer<C>, QuicError>> {
         let (tx, rx) = oneshot::channel();
         let msg = ToEndpoint::Dial {
             addr,
@@ -67,7 +69,7 @@ impl TransportChannel {
     pub fn poll_incoming(
         &mut self,
         cx: &mut Context,
-    ) -> Poll<Option<Result<QuicMuxer, QuicError>>> {
+    ) -> Poll<Option<Result<QuicMuxer<C>, QuicError>>> {
         Pin::new(&mut self.rx).poll_next(cx)
     }
 
@@ -81,15 +83,15 @@ impl TransportChannel {
 }
 
 #[derive(Debug)]
-pub struct ConnectionChannel {
+pub struct ConnectionChannel<C: Crypto> {
     id: ConnectionHandle,
-    tx: mpsc::UnboundedSender<ToEndpoint>,
+    tx: mpsc::UnboundedSender<ToEndpoint<C>>,
     rx: mpsc::UnboundedReceiver<ConnectionEvent>,
     port: u16,
     max_datagrams: usize,
 }
 
-impl ConnectionChannel {
+impl<C: Crypto> ConnectionChannel<C> {
     pub fn poll_channel_events(&mut self, cx: &mut Context) -> Poll<ConnectionEvent> {
         match Pin::new(&mut self.rx).poll_next(cx) {
             Poll::Ready(Some(event)) => Poll::Ready(event),
@@ -121,27 +123,27 @@ impl ConnectionChannel {
 }
 
 #[derive(Debug)]
-struct EndpointChannel {
-    rx: mpsc::UnboundedReceiver<ToEndpoint>,
-    tx: mpsc::UnboundedSender<Result<QuicMuxer, QuicError>>,
+struct EndpointChannel<C: Crypto> {
+    rx: mpsc::UnboundedReceiver<ToEndpoint<C>>,
+    tx: mpsc::UnboundedSender<Result<QuicMuxer<C>, QuicError>>,
     port: u16,
     max_datagrams: usize,
-    connection_tx: mpsc::UnboundedSender<ToEndpoint>,
+    connection_tx: mpsc::UnboundedSender<ToEndpoint<C>>,
 }
 
-impl EndpointChannel {
-    pub fn send_incoming(&mut self, muxer: QuicMuxer) {
+impl<C: Crypto> EndpointChannel<C> {
+    pub fn send_incoming(&mut self, muxer: QuicMuxer<C>) {
         self.tx.unbounded_send(Ok(muxer)).ok();
     }
 
-    pub fn poll_next_event(&mut self, cx: &mut Context) -> Poll<Option<ToEndpoint>> {
+    pub fn poll_next_event(&mut self, cx: &mut Context) -> Poll<Option<ToEndpoint<C>>> {
         Pin::new(&mut self.rx).poll_next(cx)
     }
 
     pub fn create_connection(
         &self,
         id: ConnectionHandle,
-    ) -> (ConnectionChannel, mpsc::UnboundedSender<ConnectionEvent>) {
+    ) -> (ConnectionChannel<C>, mpsc::UnboundedSender<ConnectionEvent>) {
         let (tx, rx) = mpsc::unbounded();
         let channel = ConnectionChannel {
             id,
@@ -154,44 +156,37 @@ impl EndpointChannel {
     }
 }
 
-type QuinnEndpointConfig = quinn_proto::generic::EndpointConfig<NoiseSession>;
-type QuinnEndpoint = quinn_proto::generic::Endpoint<NoiseSession>;
+type QuinnEndpointConfig<S> = quinn_proto::generic::EndpointConfig<S>;
+type QuinnEndpoint<S> = quinn_proto::generic::Endpoint<S>;
 
-pub struct EndpointConfig {
+pub struct EndpointConfig<C: Crypto> {
     socket: UdpSocket,
-    endpoint: QuinnEndpoint,
+    endpoint: QuinnEndpoint<C::Session>,
     port: u16,
-    client_config: ClientConfig<NoiseSession>,
+    crypto_config: Arc<CryptoConfig<C::Keylogger>>,
     capabilities: UdpCapabilities,
 }
 
-impl EndpointConfig {
-    pub fn new(mut config: QuicConfig, addr: SocketAddr) -> Result<Self, QuicError> {
+impl<C: Crypto> EndpointConfig<C> {
+    pub fn new(mut config: QuicConfig<C>, addr: SocketAddr) -> Result<Self, QuicError> {
         config.transport.max_concurrent_uni_streams(0)?;
         config.transport.datagram_receive_buffer_size(None);
         let transport = Arc::new(config.transport);
 
-        let noise_config = NoiseConfig {
-            keypair: Some(config.keypair),
+        let crypto_config = Arc::new(CryptoConfig {
+            keypair: config.keypair,
             psk: config.psk,
-            remote_public_key: None,
             keylogger: config.keylogger,
-        };
+            transport: transport.clone(),
+        });
 
-        let mut server_config = ServerConfig::<NoiseSession>::default();
-        server_config.transport = transport.clone();
-        server_config.crypto = Arc::new(noise_config.clone());
-
-        let client_config = ClientConfig::<NoiseSession> {
-            transport,
-            crypto: noise_config,
-        };
+        let mut server_config = ServerConfig::<C::Session>::default();
+        server_config.transport = transport;
+        server_config.crypto = C::new_server_config(&crypto_config);
 
         let mut endpoint_config = QuinnEndpointConfig::default();
-        endpoint_config.supported_versions(
-            quinn_noise::SUPPORTED_QUIC_VERSIONS.to_vec(),
-            quinn_noise::DEFAULT_QUIC_VERSION,
-        )?;
+        endpoint_config
+            .supported_versions(C::supported_quic_versions(), C::default_quic_version())?;
 
         let socket = UdpSocket::bind(addr)?;
         let port = socket.local_addr()?.port();
@@ -204,12 +199,15 @@ impl EndpointConfig {
             socket,
             endpoint,
             port,
-            client_config,
+            crypto_config,
             capabilities,
         })
     }
 
-    pub fn spawn(self) -> TransportChannel {
+    pub fn spawn(self) -> TransportChannel<C>
+    where
+        <C::Session as Session>::ClientConfig: Send + Unpin,
+    {
         let (tx1, rx1) = mpsc::unbounded();
         let (tx2, rx2) = mpsc::unbounded();
         let transport = TransportChannel {
@@ -230,18 +228,18 @@ impl EndpointConfig {
     }
 }
 
-struct Endpoint {
-    channel: EndpointChannel,
-    endpoint: QuinnEndpoint,
+struct Endpoint<C: Crypto> {
+    channel: EndpointChannel<C>,
+    endpoint: QuinnEndpoint<C::Session>,
     socket: UdpSocket,
-    client_config: ClientConfig<NoiseSession>,
+    crypto_config: Arc<CryptoConfig<C::Keylogger>>,
     connections: FnvHashMap<ConnectionHandle, mpsc::UnboundedSender<ConnectionEvent>>,
     outgoing: VecDeque<udp_socket::Transmit>,
     recv_buf: Box<[u8]>,
 }
 
-impl Endpoint {
-    pub fn new(channel: EndpointChannel, config: EndpointConfig) -> Self {
+impl<C: Crypto> Endpoint<C> {
+    pub fn new(channel: EndpointChannel<C>, config: EndpointConfig<C>) -> Self {
         let max_udp_payload_size = config
             .endpoint
             .config()
@@ -252,7 +250,7 @@ impl Endpoint {
             channel,
             endpoint: config.endpoint,
             socket: config.socket,
-            client_config: config.client_config,
+            crypto_config: config.crypto_config,
             connections: Default::default(),
             outgoing: Default::default(),
             recv_buf,
@@ -275,7 +273,10 @@ impl Endpoint {
     }
 }
 
-impl Future for Endpoint {
+impl<C: Crypto> Future for Endpoint<C>
+where
+    <C::Session as Session>::ClientConfig: Unpin,
+{
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
@@ -292,8 +293,11 @@ impl Future for Endpoint {
                     public_key,
                     tx,
                 }) => {
-                    let mut client_config = me.client_config.clone();
-                    client_config.crypto.remote_public_key = Some(public_key);
+                    let crypto = C::new_client_config(&me.crypto_config, public_key);
+                    let client_config = ClientConfig {
+                        transport: me.crypto_config.transport.clone(),
+                        crypto,
+                    };
                     let (id, connection) =
                         match me.endpoint.connect(client_config, addr, "server_name") {
                             Ok(c) => c,
