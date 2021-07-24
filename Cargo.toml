@@ -50,7 +50,6 @@ debug = true
 
 [[example]]
 name = "smoke"
-required-features = ["noise"]
 
 [patch.crates-io]
 x509-signature = { path = "../barebones-x509" }
