@@ -45,7 +45,7 @@ enum ToEndpoint<C: Crypto> {
 #[derive(Debug)]
 pub struct TransportChannel<C: Crypto> {
     tx: mpsc::UnboundedSender<ToEndpoint<C>>,
-    rx: mpsc::UnboundedReceiver<Result<QuicMuxer<C>, QuicError>>,
+    rx: mpsc::Receiver<Result<QuicMuxer<C>, QuicError>>,
     port: u16,
     ty: SocketType,
 }
@@ -86,7 +86,7 @@ impl<C: Crypto> TransportChannel<C> {
 pub struct ConnectionChannel<C: Crypto> {
     id: ConnectionHandle,
     tx: mpsc::UnboundedSender<ToEndpoint<C>>,
-    rx: mpsc::UnboundedReceiver<ConnectionEvent>,
+    rx: mpsc::Receiver<ConnectionEvent>,
     port: u16,
     max_datagrams: usize,
 }
@@ -125,17 +125,13 @@ impl<C: Crypto> ConnectionChannel<C> {
 #[derive(Debug)]
 struct EndpointChannel<C: Crypto> {
     rx: mpsc::UnboundedReceiver<ToEndpoint<C>>,
-    tx: mpsc::UnboundedSender<Result<QuicMuxer<C>, QuicError>>,
+    tx: mpsc::Sender<Result<QuicMuxer<C>, QuicError>>,
     port: u16,
     max_datagrams: usize,
     connection_tx: mpsc::UnboundedSender<ToEndpoint<C>>,
 }
 
 impl<C: Crypto> EndpointChannel<C> {
-    pub fn send_incoming(&mut self, muxer: QuicMuxer<C>) {
-        self.tx.unbounded_send(Ok(muxer)).ok();
-    }
-
     pub fn poll_next_event(&mut self, cx: &mut Context) -> Poll<Option<ToEndpoint<C>>> {
         Pin::new(&mut self.rx).poll_next(cx)
     }
@@ -143,8 +139,8 @@ impl<C: Crypto> EndpointChannel<C> {
     pub fn create_connection(
         &self,
         id: ConnectionHandle,
-    ) -> (ConnectionChannel<C>, mpsc::UnboundedSender<ConnectionEvent>) {
-        let (tx, rx) = mpsc::unbounded();
+    ) -> (ConnectionChannel<C>, mpsc::Sender<ConnectionEvent>) {
+        let (tx, rx) = mpsc::channel(12);
         let channel = ConnectionChannel {
             id,
             tx: self.connection_tx.clone(),
@@ -207,9 +203,11 @@ impl<C: Crypto> EndpointConfig<C> {
     pub fn spawn(self) -> TransportChannel<C>
     where
         <C::Session as Session>::ClientConfig: Send + Unpin,
+        <C::Session as Session>::HeaderKey: Unpin,
+        <C::Session as Session>::PacketKey: Unpin,
     {
         let (tx1, rx1) = mpsc::unbounded();
-        let (tx2, rx2) = mpsc::unbounded();
+        let (tx2, rx2) = mpsc::channel(1);
         let transport = TransportChannel {
             tx: tx1,
             rx: rx2,
@@ -233,9 +231,11 @@ struct Endpoint<C: Crypto> {
     endpoint: QuinnEndpoint<C::Session>,
     socket: UdpSocket,
     crypto_config: Arc<CryptoConfig<C::Keylogger>>,
-    connections: FnvHashMap<ConnectionHandle, mpsc::UnboundedSender<ConnectionEvent>>,
+    connections: FnvHashMap<ConnectionHandle, mpsc::Sender<ConnectionEvent>>,
     outgoing: VecDeque<udp_socket::Transmit>,
     recv_buf: Box<[u8]>,
+    incoming_slot: Option<QuicMuxer<C>>,
+    event_slot: Option<(ConnectionHandle, ConnectionEvent)>,
 }
 
 impl<C: Crypto> Endpoint<C> {
@@ -254,6 +254,8 @@ impl<C: Crypto> Endpoint<C> {
             connections: Default::default(),
             outgoing: Default::default(),
             recv_buf,
+            incoming_slot: None,
+            event_slot: None,
         }
     }
 
@@ -271,69 +273,120 @@ impl<C: Crypto> Endpoint<C> {
         };
         self.outgoing.push_back(transmit);
     }
+
+    fn send_incoming(&mut self, muxer: QuicMuxer<C>, cx: &mut Context) -> bool {
+        assert!(self.incoming_slot.is_none());
+        match self.channel.tx.poll_ready(cx) {
+            Poll::Pending => {
+                self.incoming_slot = Some(muxer);
+                true
+            }
+            Poll::Ready(Ok(())) => {
+                self.channel.tx.try_send(Ok(muxer)).ok();
+                false
+            }
+            Poll::Ready(_err) => false,
+        }
+    }
+
+    fn send_event(
+        &mut self,
+        id: ConnectionHandle,
+        event: ConnectionEvent,
+        cx: &mut Context,
+    ) -> bool {
+        assert!(self.event_slot.is_none());
+        let conn = self.connections.get_mut(&id).unwrap();
+        match conn.poll_ready(cx) {
+            Poll::Pending => {
+                self.event_slot = Some((id, event));
+                true
+            }
+            Poll::Ready(Ok(())) => {
+                conn.try_send(event).ok();
+                false
+            }
+            Poll::Ready(_err) => false,
+        }
+    }
 }
 
 impl<C: Crypto> Future for Endpoint<C>
 where
     <C::Session as Session>::ClientConfig: Unpin,
+    <C::Session as Session>::HeaderKey: Unpin,
+    <C::Session as Session>::PacketKey: Unpin,
 {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
         let me = Pin::into_inner(self);
 
+        if let Some(muxer) = me.incoming_slot.take() {
+            if !me.send_incoming(muxer, cx) {
+                tracing::info!("cleared incoming slot");
+            }
+        }
+
+        if let Some((id, event)) = me.event_slot.take() {
+            if !me.send_event(id, event, cx) {
+                tracing::info!("cleared event slot");
+            }
+        }
+
         while let Some(transmit) = me.endpoint.poll_transmit() {
             me.transmit(transmit);
         }
 
-        while let Poll::Ready(event) = me.channel.poll_next_event(cx) {
-            match event {
-                Some(ToEndpoint::Dial {
-                    addr,
-                    public_key,
-                    tx,
-                }) => {
-                    let crypto = C::new_client_config(&me.crypto_config, public_key);
-                    let client_config = ClientConfig {
-                        transport: me.crypto_config.transport.clone(),
-                        crypto,
-                    };
-                    let (id, connection) =
-                        match me.endpoint.connect(client_config, addr, "server_name") {
-                            Ok(c) => c,
-                            Err(err) => {
-                                tracing::error!("dial failure: {}", err);
-                                let _ = tx.send(Err(err.into()));
-                                continue;
-                            }
+        if me.event_slot.is_none() {
+            while let Poll::Ready(event) = me.channel.poll_next_event(cx) {
+                match event {
+                    Some(ToEndpoint::Dial {
+                        addr,
+                        public_key,
+                        tx,
+                    }) => {
+                        let crypto = C::new_client_config(&me.crypto_config, public_key);
+                        let client_config = ClientConfig {
+                            transport: me.crypto_config.transport.clone(),
+                            crypto,
                         };
-                    let (channel, conn) = me.channel.create_connection(id);
-                    me.connections.insert(id, conn);
-                    let muxer = QuicMuxer::new(channel, connection);
-                    tx.send(Ok(muxer)).ok();
-                }
-                Some(ToEndpoint::ConnectionEvent {
-                    connection_id,
-                    event,
-                }) => {
-                    let is_drained_event = event.is_drained();
-                    if is_drained_event {
-                        me.connections.remove(&connection_id);
+                        let (id, connection) =
+                            match me.endpoint.connect(client_config, addr, "server_name") {
+                                Ok(c) => c,
+                                Err(err) => {
+                                    tracing::error!("dial failure: {}", err);
+                                    let _ = tx.send(Err(err.into()));
+                                    continue;
+                                }
+                            };
+                        let (channel, conn) = me.channel.create_connection(id);
+                        me.connections.insert(id, conn);
+                        let muxer = QuicMuxer::new(channel, connection);
+                        tx.send(Ok(muxer)).ok();
                     }
-                    if let Some(event) = me.endpoint.handle_event(connection_id, event) {
-                        me.connections
-                            .get_mut(&connection_id)
-                            .unwrap()
-                            .unbounded_send(event)
-                            .ok();
+                    Some(ToEndpoint::ConnectionEvent {
+                        connection_id,
+                        event,
+                    }) => {
+                        let is_drained_event = event.is_drained();
+                        if is_drained_event {
+                            me.connections.remove(&connection_id);
+                        }
+                        if let Some(event) = me.endpoint.handle_event(connection_id, event) {
+                            if me.send_event(connection_id, event, cx) {
+                                tracing::info!("filled event slot");
+                                break;
+                            }
+                        }
                     }
-                }
-                Some(ToEndpoint::Transmit(transmit)) => {
-                    me.transmit(transmit);
-                }
-                None => {
-                    me.endpoint.reject_new_connections();
-                    return Poll::Ready(());
+                    Some(ToEndpoint::Transmit(transmit)) => {
+                        me.transmit(transmit);
+                    }
+                    None => {
+                        me.endpoint.reject_new_connections();
+                        return Poll::Ready(());
+                    }
                 }
             }
         }
@@ -349,50 +402,54 @@ where
             }
         }
 
-        let mut metas = [RecvMeta::default(); BATCH_SIZE];
-        let mut iovs = MaybeUninit::<[IoSliceMut; BATCH_SIZE]>::uninit();
-        me.recv_buf
-            .chunks_mut(me.recv_buf.len() / BATCH_SIZE)
-            .enumerate()
-            .for_each(|(i, buf)| unsafe {
-                iovs.as_mut_ptr()
-                    .cast::<IoSliceMut>()
-                    .add(i)
-                    .write(IoSliceMut::new(buf));
-            });
-        let mut iovs = unsafe { iovs.assume_init() };
-        while let Poll::Ready(result) = me.socket.poll_recv(cx, &mut iovs, &mut metas) {
-            let n = match result {
-                Ok(n) => n,
-                Err(err) => {
-                    tracing::error!("recv_from: {}", err);
-                    continue;
-                }
-            };
-            for i in 0..n {
-                let meta = &metas[i];
-                let packet = From::from(&iovs[i][..meta.len]);
-                let ecn = meta
-                    .ecn
-                    .map(|ecn| EcnCodepoint::from_bits(ecn as u8))
-                    .unwrap_or_default();
-                match me
-                    .endpoint
-                    .handle(Instant::now(), meta.source, meta.dst_ip, ecn, packet)
-                {
-                    None => {}
-                    Some((id, DatagramEvent::ConnectionEvent(event))) => {
-                        me.connections
-                            .get_mut(&id)
-                            .unwrap()
-                            .unbounded_send(event)
-                            .ok();
+        if me.event_slot.is_none() && me.incoming_slot.is_none() {
+            let mut metas = [RecvMeta::default(); BATCH_SIZE];
+            let mut iovs = MaybeUninit::<[IoSliceMut; BATCH_SIZE]>::uninit();
+            me.recv_buf
+                .chunks_mut(me.recv_buf.len() / BATCH_SIZE)
+                .enumerate()
+                .for_each(|(i, buf)| unsafe {
+                    iovs.as_mut_ptr()
+                        .cast::<IoSliceMut>()
+                        .add(i)
+                        .write(IoSliceMut::new(buf));
+                });
+            let mut iovs = unsafe { iovs.assume_init() };
+            while let Poll::Ready(result) = me.socket.poll_recv(cx, &mut iovs, &mut metas) {
+                let n = match result {
+                    Ok(n) => n,
+                    Err(err) => {
+                        tracing::error!("recv_from: {}", err);
+                        continue;
                     }
-                    Some((id, DatagramEvent::NewConnection(connection))) => {
-                        let (channel, tx) = me.channel.create_connection(id);
-                        me.connections.insert(id, tx);
-                        let muxer = QuicMuxer::new(channel, connection);
-                        let _ = me.channel.send_incoming(muxer);
+                };
+                for i in 0..n {
+                    let meta = &metas[i];
+                    let packet = From::from(&iovs[i][..meta.len]);
+                    let ecn = meta
+                        .ecn
+                        .map(|ecn| EcnCodepoint::from_bits(ecn as u8))
+                        .unwrap_or_default();
+                    match me
+                        .endpoint
+                        .handle(Instant::now(), meta.source, meta.dst_ip, ecn, packet)
+                    {
+                        None => {}
+                        Some((id, DatagramEvent::ConnectionEvent(event))) => {
+                            if me.send_event(id, event, cx) {
+                                tracing::info!("filled event slot");
+                                break;
+                            }
+                        }
+                        Some((id, DatagramEvent::NewConnection(connection))) => {
+                            let (channel, tx) = me.channel.create_connection(id);
+                            me.connections.insert(id, tx);
+                            let muxer = QuicMuxer::new(channel, connection);
+                            if me.send_incoming(muxer, cx) {
+                                tracing::info!("filled incoming slot");
+                                break;
+                            }
+                        }
                     }
                 }
             }
