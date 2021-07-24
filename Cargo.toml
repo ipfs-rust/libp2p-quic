@@ -53,3 +53,4 @@ name = "smoke"
 
 [patch.crates-io]
 x509-signature = { path = "../barebones-x509" }
+quinn-noise = { path = "../quinn-noise" }

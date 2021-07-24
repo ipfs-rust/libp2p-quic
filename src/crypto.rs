@@ -50,6 +50,7 @@ impl Crypto for NoiseCrypto {
         Arc::new(quinn_noise::NoiseConfig {
             keypair: Some(config.clone_keypair()),
             psk: config.psk,
+            alpn: b"libp2p".to_vec(),
             remote_public_key: None,
             keylogger: config.keylogger.clone(),
         })
@@ -62,6 +63,7 @@ impl Crypto for NoiseCrypto {
         quinn_noise::NoiseConfig {
             keypair: Some(config.clone_keypair()),
             psk: config.psk,
+            alpn: b"libp2p".to_vec(),
             remote_public_key: Some(remote_public),
             keylogger: config.keylogger.clone(),
         }

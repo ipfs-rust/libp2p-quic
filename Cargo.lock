@@ -1425,8 +1425,6 @@ dependencies = [
 [[package]]
 name = "quinn-noise"
 version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "83e7626a7a184fe86b38d5b3a87722695d3108a89a3d856a75e42e1cfb49db34"
 dependencies = [
  "bytes",
  "chacha20poly1305",
