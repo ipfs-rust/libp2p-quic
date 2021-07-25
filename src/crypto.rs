@@ -47,26 +47,25 @@ impl Crypto for NoiseCrypto {
     fn new_server_config(
         config: &Arc<CryptoConfig<Self::Keylogger>>,
     ) -> <Self::Session as Session>::ServerConfig {
-        Arc::new(quinn_noise::NoiseConfig {
-            keypair: Some(config.clone_keypair()),
+        Arc::new(quinn_noise::NoiseServerConfig {
+            keypair: config.clone_keypair(),
             psk: config.psk,
-            alpn: b"libp2p".to_vec(),
-            remote_public_key: None,
             keylogger: config.keylogger.clone(),
-        })
+            supported_protocols: vec![b"libp2p".to_vec()],
+        }.into())
     }
 
     fn new_client_config(
         config: &Arc<CryptoConfig<Self::Keylogger>>,
-        remote_public: PublicKey,
+        remote_public_key: PublicKey,
     ) -> <Self::Session as Session>::ClientConfig {
-        quinn_noise::NoiseConfig {
-            keypair: Some(config.clone_keypair()),
+        quinn_noise::NoiseClientConfig {
+            keypair: config.clone_keypair(),
             psk: config.psk,
             alpn: b"libp2p".to_vec(),
-            remote_public_key: Some(remote_public),
+            remote_public_key,
             keylogger: config.keylogger.clone(),
-        }
+        }.into()
     }
 
     fn supported_quic_versions() -> Vec<u32> {
