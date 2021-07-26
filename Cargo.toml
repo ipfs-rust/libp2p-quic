@@ -1,6 +1,6 @@
 [package]
 name = "libp2p-quic"
-version = "0.5.0"
+version = "0.6.0"
 authors = ["David Craven <david@craven.ch>", "Parity Technologies <admin@parity.io>"]
 edition = "2018"
 description = "libp2p-quic is a noise based quic implementation for rust-libp2p."
