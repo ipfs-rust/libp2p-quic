@@ -123,7 +123,7 @@ impl rustls::ClientCertVerifier for Libp2pCertificateVerifier {
         cert: &Certificate,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, TLSError> {
-        x509_signature::parse_certificate(cert.as_ref())
+        barebones_x509::parse_certificate(cert.as_ref())
             .map_err(rustls::TLSError::WebPKIError)?
             .check_tls13_signature(dss.scheme, message, dss.sig.0.as_ref())
             .map_err(rustls::TLSError::WebPKIError)
@@ -136,7 +136,7 @@ fn verify_tls13_signature(
     cert: &Certificate,
     dss: &DigitallySignedStruct,
 ) -> Result<HandshakeSignatureValid, TLSError> {
-    x509_signature::parse_certificate(cert.as_ref())
+    barebones_x509::parse_certificate(cert.as_ref())
         .map_err(rustls::TLSError::WebPKIError)?
         .check_tls13_signature(dss.scheme, message, dss.sig.0.as_ref())
         .map_err(rustls::TLSError::WebPKIError)
@@ -162,8 +162,8 @@ fn verify_libp2p_signature(
 
 fn parse_certificate(
     certificate: &[u8],
-) -> Result<(x509_signature::X509Certificate<'_>, Libp2pExtension<'_>), Error> {
-    let parsed = x509_signature::parse_certificate(certificate)?;
+) -> Result<(barebones_x509::X509Certificate<'_>, Libp2pExtension<'_>), Error> {
+    let parsed = barebones_x509::parse_certificate(certificate)?;
     let mut libp2p_extension = None;
 
     parsed

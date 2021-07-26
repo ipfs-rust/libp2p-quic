@@ -199,6 +199,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cdb031dd78e28731d87d56cc8ffef4a8f36ca26c38fe2de700543e627f8a464a"
 
 [[package]]
+name = "barebones-x509"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ffb20ff89732c4bbab2ac678401359f02f73e40c06cf4ebc16bba952ba57b630"
+dependencies = [
+ "ring",
+ "rustls",
+ "untrusted",
+ "webpki",
+]
+
+[[package]]
 name = "base64"
 version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -872,6 +884,7 @@ dependencies = [
  "async-io",
  "async-std",
  "async-trait",
+ "barebones-x509",
  "bytes",
  "ed25519-dalek",
  "fnv",
@@ -894,7 +907,6 @@ dependencies = [
  "udp-socket",
  "untrusted",
  "webpki",
- "x509-signature",
  "yasna",
 ]
 
@@ -1424,7 +1436,9 @@ dependencies = [
 
 [[package]]
 name = "quinn-noise"
-version = "0.2.1"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e1c50d22f398d489a79753d17bab5a6f9fb48e5cc537ce50b0bb9312ae07ea9"
 dependencies = [
  "bytes",
  "chacha20poly1305",
@@ -2210,16 +2224,6 @@ dependencies = [
  "curve25519-dalek",
  "rand_core 0.5.1",
  "zeroize",
-]
-
-[[package]]
-name = "x509-signature"
-version = "0.5.0"
-dependencies = [
- "ring",
- "rustls",
- "untrusted",
- "webpki",
 ]
 
 [[package]]
