@@ -199,10 +199,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cdb031dd78e28731d87d56cc8ffef4a8f36ca26c38fe2de700543e627f8a464a"
 
 [[package]]
+name = "barebones-x509"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ffb20ff89732c4bbab2ac678401359f02f73e40c06cf4ebc16bba952ba57b630"
+dependencies = [
+ "ring",
+ "rustls",
+ "untrusted",
+ "webpki",
+]
+
+[[package]]
 name = "base64"
 version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3441f0f7b02788e948e47f457ca01f1d7e6d92c693bc132c22b087d3141c03ff"
+
+[[package]]
+name = "base64"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "904dfeac50f3cdaba28fc6f57fdcddb75f49ed61346676a78c4ffe55877802fd"
 
 [[package]]
 name = "bitflags"
@@ -866,7 +884,9 @@ dependencies = [
  "async-io",
  "async-std",
  "async-trait",
+ "barebones-x509",
  "bytes",
+ "ed25519-dalek",
  "fnv",
  "futures",
  "if-watch",
@@ -878,10 +898,16 @@ dependencies = [
  "quinn-proto",
  "rand 0.8.4",
  "rand_core 0.5.1",
+ "rcgen",
+ "ring",
+ "rustls",
  "thiserror",
  "tracing",
  "tracing-subscriber",
  "udp-socket",
+ "untrusted",
+ "webpki",
+ "yasna",
 ]
 
 [[package]]
@@ -937,7 +963,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bd1137239ab33b41aa9637a88a28249e5e70c40a42ccc92db7f12cc356c1fcd7"
 dependencies = [
  "arrayref",
- "base64",
+ "base64 0.12.3",
  "digest",
  "hmac-drbg",
  "libsecp256k1-core",
@@ -1194,6 +1220,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "pem"
+version = "0.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fd56cbd21fea48d0c440b41cd69c589faacade08c992d9a54e471b79d0fd13eb"
+dependencies = [
+ "base64 0.13.0",
+ "once_cell",
+ "regex",
+]
+
+[[package]]
 name = "percent-encoding"
 version = "2.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1399,9 +1436,9 @@ dependencies = [
 
 [[package]]
 name = "quinn-noise"
-version = "0.2.1"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "83e7626a7a184fe86b38d5b3a87722695d3108a89a3d856a75e42e1cfb49db34"
+checksum = "5e1c50d22f398d489a79753d17bab5a6f9fb48e5cc537ce50b0bb9312ae07ea9"
 dependencies = [
  "bytes",
  "chacha20poly1305",
@@ -1427,10 +1464,12 @@ dependencies = [
  "bytes",
  "rand 0.8.4",
  "ring",
+ "rustls",
  "slab",
  "thiserror",
  "tinyvec",
  "tracing",
+ "webpki",
 ]
 
 [[package]]
@@ -1530,6 +1569,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04d0088f16afb86d12c7f239d8de4637fa68ecc99a3db227e1ab58a294713e60"
 
 [[package]]
+name = "rcgen"
+version = "0.8.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "48b4fc1b81d685fcd442a86da2e2c829d9e353142633a8159f42bf28e7e94428"
+dependencies = [
+ "chrono",
+ "pem",
+ "ring",
+ "yasna",
+]
+
+[[package]]
 name = "redox_syscall"
 version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1587,6 +1638,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustls"
+version = "0.19.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "35edb675feee39aec9c99fa5ff985081995a06d594114ae14cbe797ad7b7a6d7"
+dependencies = [
+ "base64 0.13.0",
+ "log",
+ "ring",
+ "sct",
+ "webpki",
+]
+
+[[package]]
 name = "rw-stream-sink"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1608,6 +1672,16 @@ name = "scopeguard"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d29ab0c6d3fc0ee92fe66e2d99f700eab17a8d57d1c1d3b748380fb20baa78cd"
+
+[[package]]
+name = "sct"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b362b83898e0e69f38515b82ee15aa80636befe47c3b6d3d89a911e78fc228ce"
+dependencies = [
+ "ring",
+ "untrusted",
+]
 
 [[package]]
 name = "serde"
@@ -2091,6 +2165,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "webpki"
+version = "0.21.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8e38c0608262c46d4a56202ebabdeb094cef7e560ca7a226c6bf055188aa4ea"
+dependencies = [
+ "ring",
+ "untrusted",
+]
+
+[[package]]
 name = "wepoll-ffi"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2150,6 +2234,15 @@ checksum = "c1d3c62cbaa9cfdecac0b6aaac5cef3fae1de43c858ac902d6f78b6ee0926107"
 dependencies = [
  "rawbytes",
  "zeroize",
+]
+
+[[package]]
+name = "yasna"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e262a29d0e61ccf2b6190d7050d4b237535fc76ce4c1210d9caa316f71dffa75"
+dependencies = [
+ "chrono",
 ]
 
 [[package]]
