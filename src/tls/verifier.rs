@@ -193,7 +193,7 @@ fn verify_presented_certs(presented_certs: &[Certificate]) -> Result<(), TLSErro
     certificate
         .check_self_issued()
         .map_err(TLSError::WebPKIError)?;
-    verify_libp2p_signature(&extension, certificate.subject_public_key_info().key())
+    verify_libp2p_signature(&extension, certificate.subject_public_key_info().spki())
         .map_err(TLSError::WebPKIError)
 }
 
@@ -204,7 +204,9 @@ struct Libp2pExtension<'a> {
 
 fn parse_libp2p_extension(extension: Input<'_>) -> Result<Libp2pExtension<'_>, Error> {
     fn read_bit_string<'a>(input: &mut Reader<'a>, e: Error) -> Result<Input<'a>, Error> {
-        der::bit_string_with_no_unused_bits(input).map_err(|_| e)
+        // The specification states that this is a BIT STRING, but the Go implementation
+        // uses an OCTET STRING.  OCTET STRING is superior in this context, so use it.
+        der::expect_tag_and_get_value(input, der::Tag::OctetString).map_err(|_| e)
     }
 
     let e = Error::ExtensionValueInvalid;
