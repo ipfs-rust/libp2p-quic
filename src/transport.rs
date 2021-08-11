@@ -248,7 +248,7 @@ fn multiaddr_to_socketaddr(addr: &Multiaddr) -> Result<(SocketAddr, Option<Publi
     let proto3 = iter.next().ok_or(())?;
 
     let peer_id = if let Some(Protocol::P2p(peer_id)) = iter.peek() {
-        if peer_id.code() != multihash::Code::Identity.into() {
+        if peer_id.code() != u64::from(multihash::Code::Identity) {
             return Err(());
         }
         let public_key =
