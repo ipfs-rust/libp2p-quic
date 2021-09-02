@@ -158,7 +158,7 @@ pub struct EndpointConfig<C: Crypto> {
     socket: UdpSocket,
     endpoint: QuinnEndpoint<C::Session>,
     port: u16,
-    crypto_config: Arc<CryptoConfig<C::Keylogger>>,
+    crypto_config: Arc<CryptoConfig<C>>,
     capabilities: UdpCapabilities,
 }
 
@@ -229,7 +229,7 @@ struct Endpoint<C: Crypto> {
     channel: EndpointChannel<C>,
     endpoint: QuinnEndpoint<C::Session>,
     socket: UdpSocket,
-    crypto_config: Arc<CryptoConfig<C::Keylogger>>,
+    crypto_config: Arc<CryptoConfig<C>>,
     connections: FnvHashMap<ConnectionHandle, mpsc::Sender<ConnectionEvent>>,
     outgoing: VecDeque<udp_socket::Transmit>,
     recv_buf: Box<[u8]>,

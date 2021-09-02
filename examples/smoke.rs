@@ -21,7 +21,7 @@ async fn main() -> anyhow::Result<()> {
         RequestResponseConfig, RequestResponseEvent, RequestResponseMessage,
     };
     use libp2p::swarm::{Swarm, SwarmBuilder, SwarmEvent};
-    use libp2p_quic::{Keypair, QuicConfig, ToLibp2p};
+    use libp2p_quic::{QuicConfig, ToLibp2p};
     use rand::RngCore;
     use std::time::Instant;
     use std::{io, iter};
@@ -31,8 +31,17 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(feature = "tls")]
     type Crypto = libp2p_quic::TlsCrypto;
 
+    #[cfg(feature = "noise")]
+    fn generate_keypair() -> ed25519_dalek::Keypair {
+        ed25519_dalek::Keypair::generate(&mut rand_core::OsRng {})
+    }
+    #[cfg(feature = "tls")]
+    fn generate_keypair() -> libp2p::identity::Keypair {
+        libp2p::identity::Keypair::generate_ed25519()
+    }
+
     async fn create_swarm() -> Result<Swarm<RequestResponse<PingCodec>>> {
-        let keypair = Keypair::generate(&mut rand_core::OsRng {});
+        let keypair = generate_keypair();
         let peer_id = keypair.to_peer_id();
         let transport = QuicConfig::<Crypto>::new(keypair)
             .listen_on("/ip4/127.0.0.1/udp/0/quic".parse()?)
