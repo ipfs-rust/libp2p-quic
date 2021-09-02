@@ -167,8 +167,7 @@ impl Crypto for TlsCrypto {
         config: &Arc<CryptoConfig<Self>>,
     ) -> <Self::Session as Session>::ServerConfig {
         assert!(config.psk.is_none(), "invalid config");
-        let mut server =
-            crate::tls::make_server_config(&config.keypair).expect("invalid config");
+        let mut server = crate::tls::make_server_config(&config.keypair).expect("invalid config");
         if let Some(key_log) = config.keylogger.clone() {
             server.key_log = key_log;
         }
@@ -180,11 +179,9 @@ impl Crypto for TlsCrypto {
         remote_public: Self::PublicKey,
     ) -> <Self::Session as Session>::ClientConfig {
         assert!(config.psk.is_none(), "invalid config");
-        let mut client = crate::tls::make_client_config(
-            &config.keypair,
-            remote_public.into_peer_id(),
-        )
-        .expect("invalid config");
+        let mut client =
+            crate::tls::make_client_config(&config.keypair, remote_public.into_peer_id())
+                .expect("invalid config");
         if let Some(key_log) = config.keylogger.clone() {
             client.key_log = key_log;
         }

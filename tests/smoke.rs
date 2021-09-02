@@ -54,7 +54,9 @@ impl GenerateKeypair for libp2p_quic::TlsCrypto {
     }
 }
 
-async fn create_swarm<C: Crypto + GenerateKeypair>(keylog: bool) -> Result<Swarm<RequestResponse<PingCodec>>>
+async fn create_swarm<C: Crypto + GenerateKeypair>(
+    keylog: bool,
+) -> Result<Swarm<RequestResponse<PingCodec>>>
 where
     <C::Session as Session>::ClientConfig: Send + Unpin,
     <C::Session as Session>::HeaderKey: Unpin,

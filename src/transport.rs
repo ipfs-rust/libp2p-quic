@@ -90,7 +90,8 @@ where
     type Dial = QuicDial<C>;
 
     fn listen_on(self, addr: Multiaddr) -> Result<Self::Listener, TransportError<Self::Error>> {
-        multiaddr_to_socketaddr::<C>(&addr).map_err(|_| TransportError::MultiaddrNotSupported(addr))?;
+        multiaddr_to_socketaddr::<C>(&addr)
+            .map_err(|_| TransportError::MultiaddrNotSupported(addr))?;
         Ok(self)
     }
 
@@ -240,7 +241,9 @@ where
 
 /// Tries to turn a QUIC multiaddress into a UDP [`SocketAddr`]. Returns an error if the format
 /// of the multiaddr is wrong.
-fn multiaddr_to_socketaddr<C: Crypto>(addr: &Multiaddr) -> Result<(SocketAddr, Option<C::PublicKey>), ()> {
+fn multiaddr_to_socketaddr<C: Crypto>(
+    addr: &Multiaddr,
+) -> Result<(SocketAddr, Option<C::PublicKey>), ()> {
     let mut iter = addr.iter().peekable();
     let proto1 = iter.next().ok_or(())?;
     let proto2 = iter.next().ok_or(())?;
@@ -296,10 +299,10 @@ mod tests {
     fn multiaddr_to_udp_conversion() {
         use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-        assert!(
-            multiaddr_to_socketaddr::<Crypto>(&"/ip4/127.0.0.1/udp/1234".parse::<Multiaddr>().unwrap())
-                .is_err()
-        );
+        assert!(multiaddr_to_socketaddr::<Crypto>(
+            &"/ip4/127.0.0.1/udp/1234".parse::<Multiaddr>().unwrap()
+        )
+        .is_err());
 
         assert_eq!(
             multiaddr_to_socketaddr::<Crypto>(
@@ -324,7 +327,9 @@ mod tests {
             ))
         );
         assert_eq!(
-            multiaddr_to_socketaddr::<Crypto>(&"/ip6/::1/udp/12345/quic".parse::<Multiaddr>().unwrap()),
+            multiaddr_to_socketaddr::<Crypto>(
+                &"/ip6/::1/udp/12345/quic".parse::<Multiaddr>().unwrap()
+            ),
             Ok((
                 SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1)), 12345,),
                 None
