@@ -1,4 +1,4 @@
-use ed25519_dalek::{Keypair, PublicKey};
+use ed25519_dalek::Keypair;
 use libp2p::PeerId;
 use quinn_proto::crypto::Session;
 use quinn_proto::TransportConfig;
@@ -21,17 +21,19 @@ impl<K> CryptoConfig<K> {
 pub trait Crypto: std::fmt::Debug + Clone + 'static {
     type Session: Session + Unpin;
     type Keylogger: Send + Sync;
+    type PublicKey: Send + std::fmt::Debug;
 
     fn new_server_config(
         config: &Arc<CryptoConfig<Self::Keylogger>>,
     ) -> <Self::Session as Session>::ServerConfig;
     fn new_client_config(
         config: &Arc<CryptoConfig<Self::Keylogger>>,
-        remote_public: PublicKey,
+        remote_public: Self::PublicKey,
     ) -> <Self::Session as Session>::ClientConfig;
     fn supported_quic_versions() -> Vec<u32>;
     fn default_quic_version() -> u32;
     fn peer_id(session: &Self::Session) -> Option<PeerId>;
+    fn extract_public_key(generic_key: libp2p::core::PublicKey) -> Option<Self::PublicKey>;
     fn keylogger() -> Self::Keylogger;
 }
 
@@ -43,6 +45,7 @@ pub struct NoiseCrypto;
 impl Crypto for NoiseCrypto {
     type Session = quinn_noise::NoiseSession;
     type Keylogger = Arc<dyn quinn_noise::KeyLog>;
+    type PublicKey = ed25519_dalek::PublicKey;
 
     fn new_server_config(
         config: &Arc<CryptoConfig<Self::Keylogger>>,
@@ -60,7 +63,7 @@ impl Crypto for NoiseCrypto {
 
     fn new_client_config(
         config: &Arc<CryptoConfig<Self::Keylogger>>,
-        remote_public_key: PublicKey,
+        remote_public_key: Self::PublicKey,
     ) -> <Self::Session as Session>::ClientConfig {
         quinn_noise::NoiseClientConfig {
             keypair: config.clone_keypair(),
@@ -85,6 +88,15 @@ impl Crypto for NoiseCrypto {
         Some(session.peer_identity()?.to_peer_id())
     }
 
+    fn extract_public_key(generic_key: libp2p::core::PublicKey) -> Option<Self::PublicKey> {
+        let public_key = if let libp2p::core::PublicKey::Ed25519(public_key) = generic_key {
+            public_key.encode()
+        } else {
+            return None;
+        };
+        Self::PublicKey::from_bytes(&public_key).ok()
+    }
+
     fn keylogger() -> Self::Keylogger {
         Arc::new(quinn_noise::KeyLogFile::new())
     }
@@ -98,6 +110,7 @@ pub struct TlsCrypto;
 impl Crypto for TlsCrypto {
     type Session = quinn_proto::crypto::rustls::TlsSession;
     type Keylogger = Arc<dyn rustls::KeyLog>;
+    type PublicKey = libp2p::core::PublicKey;
 
     fn new_server_config(
         config: &Arc<CryptoConfig<Self::Keylogger>>,
@@ -114,13 +127,13 @@ impl Crypto for TlsCrypto {
 
     fn new_client_config(
         config: &Arc<CryptoConfig<Self::Keylogger>>,
-        remote_public: PublicKey,
+        remote_public: Self::PublicKey,
     ) -> <Self::Session as Session>::ClientConfig {
         assert!(config.psk.is_none(), "invalid config");
         use crate::ToLibp2p;
         let mut client = crate::tls::make_client_config(
             &config.keypair.to_keypair(),
-            remote_public.to_peer_id(),
+            remote_public.into_peer_id(),
         )
         .expect("invalid config");
         if let Some(key_log) = config.keylogger.clone() {
@@ -142,6 +155,10 @@ impl Crypto for TlsCrypto {
         Some(crate::tls::extract_peerid_or_panic(
             quinn_proto::Certificate::from(certificate).as_der(),
         ))
+    }
+
+    fn extract_public_key(generic_key: libp2p::core::PublicKey) -> Option<Self::PublicKey> {
+        Some(generic_key)
     }
 
     fn keylogger() -> Self::Keylogger {

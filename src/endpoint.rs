@@ -1,7 +1,6 @@
 use crate::crypto::{Crypto, CryptoConfig};
 use crate::muxer::QuicMuxer;
 use crate::{QuicConfig, QuicError};
-use ed25519_dalek::PublicKey;
 use fnv::FnvHashMap;
 use futures::channel::{mpsc, oneshot};
 use futures::prelude::*;
@@ -28,7 +27,7 @@ enum ToEndpoint<C: Crypto> {
         /// UDP address to connect to.
         addr: SocketAddr,
         /// The remotes public key.
-        public_key: PublicKey,
+        public_key: C::PublicKey,
         /// Channel to return the result of the dialing to.
         tx: oneshot::Sender<Result<QuicMuxer<C>, QuicError>>,
     },
@@ -54,7 +53,7 @@ impl<C: Crypto> TransportChannel<C> {
     pub fn dial(
         &mut self,
         addr: SocketAddr,
-        public_key: PublicKey,
+        public_key: C::PublicKey,
     ) -> oneshot::Receiver<Result<QuicMuxer<C>, QuicError>> {
         let (tx, rx) = oneshot::channel();
         let msg = ToEndpoint::Dial {

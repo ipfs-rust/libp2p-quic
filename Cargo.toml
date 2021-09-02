@@ -3,9 +3,9 @@ name = "libp2p-quic"
 version = "0.6.1"
 authors = ["David Craven <david@craven.ch>", "Parity Technologies <admin@parity.io>"]
 edition = "2018"
-description = "libp2p-quic is a noise based quic implementation for rust-libp2p."
-repository = "https://github.com/ipfs-rust/libp2p-quic"
-license = "ISC"
+description = "TLS and Noise based QUIC transport implementation for libp2p"
+repository = "https://github.com/libp2p/rust-libp2p"
+license = "MIT"
 
 [features]
 noise = ["quinn-noise"]
